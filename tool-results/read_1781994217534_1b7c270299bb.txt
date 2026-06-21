@@ -1,0 +1,566 @@
+     1→"use client";
+     2→
+     3→import { useEffect, useRef, useState, useCallback } from "react";
+     4→import { Engine } from "@/lib/minecraft/engine";
+     5→import { BLOCKS, BlockType } from "@/lib/minecraft/blocks";
+     6→import { BASIC_RECIPES, RECIPES, type Recipe } from "@/lib/minecraft/crafting";
+     7→import type { InvSlot } from "@/lib/minecraft/inventory";
+     8→import { getBlockIconDataURL } from "@/lib/minecraft/textures";
+     9→
+    10→interface HudState {
+    11→  fps: number;
+    12→  x: number;
+    13→  y: number;
+    14→  z: number;
+    15→  locked: boolean;
+    16→  selected: number;
+    17→  timeOfDay: number;
+    18→  saveStatus: "saved" | "loaded" | "cleared" | "none";
+    19→  health: number;
+    20→  maxHealth: number;
+    21→  dead: boolean;
+    22→  selectedBlockId: number;
+    23→  breakProgress: number;
+    24→  lanStatus: "connected" | "disconnected" | "connecting";
+    25→  lanPlayers: number;
+    26→}
+    27→
+    28→const INITIAL: HudState = {
+    29→  fps: 0, x: 0, y: 0, z: 0, locked: false, selected: 0, timeOfDay: 0.25,
+    30→  saveStatus: "none", health: 20, maxHealth: 20, dead: false, selectedBlockId: BlockType.AIR,
+    31→  breakProgress: 0, lanStatus: "disconnected", lanPlayers: 0,
+    32→};
+    33→
+    34→const HOTBAR_SIZE = 9;
+    35→
+    36→const iconCache = new Map<string, string>();
+    37→function blockIcon(id: number, face: "top" | "side" | "bottom" = "side"): string {
+    38→  if (id === BlockType.AIR) return "";
+    39→  const key = `${id}-${face}`;
+    40→  let url = iconCache.get(key);
+    41→  if (!url) {
+    42→    url = getBlockIconDataURL(id, face);
+    43→    iconCache.set(key, url);
+    44→  }
+    45→  return url;
+    46→}
+    47→
+    48→function formatTime(t: number): string {
+    49→  const m = Math.floor(t * 24 * 60);
+    50→  const h = Math.floor(m / 60) % 24;
+    51→  const mm = m % 60;
+    52→  return `${h.toString().padStart(2, "0")}:${mm.toString().padStart(2, "0")}`;
+    53→}
+    54→
+    55→function HealthBar({ health, max }: { health: number; max: number }) {
+    56→  const hearts = Math.ceil(max / 2);
+    57→  const fullHearts = Math.floor(health / 2);
+    58→  const halfHeart = health % 2 === 1;
+    59→  return (
+    60→    <div className="flex gap-0.5">
+    61→      {Array.from({ length: hearts }).map((_, i) => {
+    62→        let cls = "text-zinc-700";
+    63→        if (i < fullHearts) cls = "text-red-500";
+    64→        else if (i === fullHearts && halfHeart) cls = "text-red-500 opacity-60";
+    65→        return (
+    66→          <span key={i} className={`text-lg leading-none ${cls}`} style={{ textShadow: "0 0 2px black" }}>
+    67→            ♥
+    68→          </span>
+    69→        );
+    70→      })}
+    71→    </div>
+    72→  );
+    73→}
+    74→
+    75→export default function MinecraftGame() {
+    76→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    77→  const containerRef = useRef<HTMLDivElement | null>(null);
+    78→  const engineRef = useRef<Engine | null>(null);
+    79→  const [hud, setHud] = useState<HudState>(INITIAL);
+    80→  const [slots, setSlots] = useState<InvSlot[]>([]);
+    81→  const [menuOpen, setMenuOpen] = useState(false);
+    82→  const [craftTableOpen, setCraftTableOpen] = useState(false);
+    83→  const [showLanPanel, setShowLanPanel] = useState(false);
+    84→  const [playerName, setPlayerName] = useState("Player");
+    85→  const [pickedUpSlot, setPickedUpSlot] = useState<number | null>(null);
+    86→
+    87→  useEffect(() => {
+    88→    if (!canvasRef.current || !containerRef.current) return;
+    89→    const engine = new Engine(canvasRef.current, containerRef.current, {
+    90→      onFps: (fps) => setHud((h) => ({ ...h, fps })),
+    91→      onPosition: (x, y, z) => setHud((h) => ({ ...h, x, y, z })),
+    92→      onLockChange: (locked) => setHud((h) => ({ ...h, locked })),
+    93→      onSlotChange: (selected) => setHud((h) => ({ ...h, selected })),
+    94→      onInventoryChange: (s) => setSlots(s),
+    95→      onCraftToggle: () => setMenuOpen((v) => !v),
+    96→      onCraftTableToggle: () => setCraftTableOpen((v) => !v),
+    97→      onTimeOfDay: (timeOfDay) => setHud((h) => ({ ...h, timeOfDay })),
+    98→      onSaveStatus: (saveStatus) => setHud((h) => ({ ...h, saveStatus })),
+    99→      onHealthChange: (health) => setHud((h) => ({ ...h, health })),
+   100→      onDeath: () => setHud((h) => ({ ...h, dead: true })),
+   101→      onRespawn: () => setHud((h) => ({ ...h, dead: false })),
+   102→      onSelectedBlockChange: (selectedBlockId) => setHud((h) => ({ ...h, selectedBlockId })),
+   103→      onBreakProgress: (breakProgress) => setHud((h) => ({ ...h, breakProgress })),
+   104→      onLanStatus: (status, playerCount) => setHud((h) => ({ ...h, lanStatus: status, lanPlayers: playerCount })),
+   105→    });
+   106→    engineRef.current = engine;
+   107→    engine.start();
+   108→    setSlots(engine.getInventorySlots());
+   109→    setHud((h) => ({ ...h, health: engine.getHealth(), maxHealth: engine.getMaxHealth() }));
+   110→
+   111→    const ctxHandler = (e: Event) => e.preventDefault();
+   112→    window.addEventListener("contextmenu", ctxHandler);
+   113→    return () => {
+   114→      window.removeEventListener("contextmenu", ctxHandler);
+   115→      engine.dispose();
+   116→      engineRef.current = null;
+   117→    };
+   118→  }, []);
+   119→
+   120→  const handlePlay = useCallback(() => engineRef.current?.requestLock(), []);
+   121→  const handleCraft = useCallback((r: Recipe) => { engineRef.current?.craftRecipe(r); }, []);
+   122→  const handleCloseMenu = useCallback(() => { setMenuOpen(false); setPickedUpSlot(null); }, []);
+   123→  const handleCloseCraftTable = useCallback(() => { setCraftTableOpen(false); setPickedUpSlot(null); }, []);
+   124→  const handleSelectSlot = useCallback((i: number) => {
+   125→    engineRef.current?.selectSlot(i);
+   126→    setHud((h) => ({ ...h, selected: i }));
+   127→  }, []);
+   128→  // Click a slot in the inventory UI: if nothing is picked up, pick up
+   129→  // this slot's item. If something is picked up, move/swap it to this slot.
+   130→  const handleSlotClick = useCallback((slotIndex: number) => {
+   131→    if (pickedUpSlot === null) {
+   132→      // Pick up (only if the slot has an item)
+   133→      if (slots[slotIndex] && slots[slotIndex].id !== BlockType.AIR) {
+   134→        setPickedUpSlot(slotIndex);
+   135→      }
+   136→    } else {
+   137→      // Move/swap
+   138→      engineRef.current?.moveItem(pickedUpSlot, slotIndex);
+   139→      setPickedUpSlot(null);
+   140→    }
+   141→  }, [pickedUpSlot, slots]);
+   142→  const handleNewWorld = useCallback(() => {
+   143→    if (window.confirm("Start a new world? This erases your saved game.")) {
+   144→      engineRef.current?.resetSave();
+   145→      window.location.reload();
+   146→    }
+   147→  }, []);
+   148→  const handleEat = useCallback(() => { engineRef.current?.eatFood(); }, []);
+   149→  const handleJoinLan = useCallback(() => {
+   150→    engineRef.current?.joinLan(playerName || "Player");
+   151→    setShowLanPanel(false);
+   152→  }, [playerName]);
+   153→  const handleLeaveLan = useCallback(() => {
+   154→    engineRef.current?.leaveLan();
+   155→  }, []);
+   156→
+   157→  const invCount = (id: number): number => {
+   158→    let n = 0;
+   159→    for (const s of slots) if (s.id === id) n += s.count;
+   160→    return n;
+   161→  };
+   162→
+   163→  const timeStr = formatTime(hud.timeOfDay);
+   164→  const isDay = hud.timeOfDay > 0.23 && hud.timeOfDay < 0.77;
+   165→  const selectedBlockName = BLOCKS[hud.selectedBlockId]?.name ?? "Empty";
+   166→  const foodCount = invCount(BlockType.FOOD);
+   167→
+   168→  return (
+   169→    <div ref={containerRef} className="relative w-screen h-screen overflow-hidden bg-[#9ad0ff] select-none">
+   170→      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full block" />
+   171→
+   172→      {/* Minimal crosshair */}
+   173→      {hud.locked && !menuOpen && (
+   174→        <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
+   175→          <div className="relative w-1.5 h-1.5 rounded-full bg-white" style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.8)" }} />
+   176→        </div>
+   177→      )}
+   178→
+   179→      {/* HUD top-left */}
+   180→      {hud.locked && (
+   181→        <div className="pointer-events-none absolute top-3 left-3 font-mono text-[13px] leading-5 text-white/95 drop-shadow-[0_1px_2px_rgba(0,0,0,0.9)] z-10">
+   182→          <div>FPS: <span className="text-emerald-300">{hud.fps}</span></div>
+   183→          <div>XYZ: {hud.x.toFixed(1)} / {hud.y.toFixed(1)} / {hud.z.toFixed(1)}</div>
+   184→          <div>
+   185→            Time: <span className={isDay ? "text-yellow-300" : "text-indigo-300"}>{timeStr}</span>
+   186→            {isDay ? " ☀" : " ☾"}
+   187→          </div>
+   188→          {hud.lanStatus === "connected" && (
+   189→            <div className="text-emerald-300">LAN: {hud.lanPlayers} player(s)</div>
+   190→          )}
+   191→        </div>
+   192→      )}
+   193→
+   194→      {/* HUD top-right */}
+   195→      {hud.locked && !menuOpen && (
+   196→        <div className="absolute top-3 right-3 z-30 text-right" style={{ pointerEvents: "none" }}>
+   197→          <div className="text-[10px] text-white/60 font-mono mb-1">
+   198→            {hud.saveStatus === "loaded" && "💾 Loaded save"}
+   199→            {hud.saveStatus === "saved" && "💾 Saved"}
+   200→            {hud.saveStatus === "cleared" && "🗑 New world"}
+   201→            {hud.saveStatus === "none" && "No save yet"}
+   202→          </div>
+   203→          {foodCount > 0 && (
+   204→            <button
+   205→              onClick={handleEat}
+   206→              className="flex items-center gap-1.5 bg-black/50 rounded px-2 py-1 hover:bg-black/70 border border-red-400/40 mb-1"
+   207→              style={{ pointerEvents: "auto" }}
+   208→              title={`Eat food to heal (you have ${foodCount})`}
+   209→            >
+   210→              <img src={blockIcon(BlockType.FOOD)} alt="food" width={20} height={20} draggable={false}
+   211→                style={{ width: 20, height: 20, imageRendering: "pixelated", display: "block" }} />
+   212→              <span className="text-white text-xs font-mono">×{foodCount}</span>
+   213→              <span className="text-emerald-300 text-xs font-bold">EAT</span>
+   214→            </button>
+   215→          )}
+   216→          <div>
+   217→            <button
+   218→              onClick={() => setShowLanPanel(true)}
+   219→              className={`text-[10px] px-2 py-1 rounded font-mono border ${
+   220→                hud.lanStatus === "connected"
+   221→                  ? "bg-emerald-600/60 text-white border-emerald-400/40"
+   222→                  : "bg-zinc-700/60 text-white/80 border-white/20"
+   223→              }`}
+   224→              style={{ pointerEvents: "auto" }}
+   225→            >
+   226→              {hud.lanStatus === "connected" ? `🌐 LAN (${hud.lanPlayers})` : "🌐 LAN"}
+   227→            </button>
+   228→          </div>
+   229→        </div>
+   230→      )}
+   231→
+   232→      {/* Health bar */}
+   233→      {hud.locked && !menuOpen && (
+   234→        <div className="pointer-events-none absolute z-10" style={{ left: "50%", bottom: "76px", transform: "translateX(-50%)" }}>
+   235→          <HealthBar health={hud.health} max={hud.maxHealth} />
+   236→        </div>
+   237→      )}
+   238→
+   239→      {/* Selected block display */}
+   240→      {hud.locked && !menuOpen && hud.selectedBlockId !== BlockType.AIR && (
+   241→        <div className="pointer-events-none absolute z-10 flex items-center gap-2 bg-black/40 rounded px-2 py-1"
+   242→          style={{ left: "50%", bottom: "78px", transform: "translateX(-180px)" }}>
+   243→          <img src={blockIcon(hud.selectedBlockId)} alt="" width={20} height={20} draggable={false}
+   244→            style={{ width: 20, height: 20, imageRendering: "pixelated", display: "block" }} />
+   245→          <span className="text-white text-xs font-mono">{selectedBlockName}</span>
+   246→        </div>
+   247→      )}
+   248→
+   249→      {/* Break progress bar */}
+   250→      {hud.locked && !menuOpen && (
+   251→        <div data-break-progress className="pointer-events-none absolute z-10" style={{ left: "50%", bottom: "100px", transform: "translateX(-50%)" }}>
+   252→          <div className="w-32 h-1.5 bg-black/50 rounded-full overflow-hidden">
+   253→            <div data-break-progress-fill className="h-full bg-white/80 transition-none" style={{ width: "0%" }} />
+   254→          </div>
+   255→          <div data-break-progress-text className="text-[9px] text-white/50 font-mono text-center mt-0.5">0%</div>
+   256→        </div>
+   257→      )}
+   258→
+   259→      {/* LAN panel */}
+   260→      {showLanPanel && (
+   261→        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowLanPanel(false)}>
+   262→          <div className="bg-zinc-900/95 border-2 border-zinc-700 rounded-lg p-5 max-w-sm w-[90%] shadow-2xl" onClick={(e) => e.stopPropagation()}>
+   263→            <h2 className="text-white text-lg font-bold mb-3">LAN Multiplayer</h2>
+   264→            {hud.lanStatus === "connected" ? (
+   265→              <div className="text-center">
+   266→                <p className="text-emerald-300 text-sm mb-3">Connected — {hud.lanPlayers} other player(s) online</p>
+   267→                <button onClick={handleLeaveLan} className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded font-bold text-sm">
+   268→                  Disconnect
+   269→                </button>
+   270→              </div>
+   271→            ) : (
+   272→              <div>
+   273→                <p className="text-white/60 text-xs mb-3">
+   274→                  Join the LAN server to see other players in your world.
+   275→                  Block edits are synced between all connected players.
+   276→                </p>
+   277→                <input
+   278→                  type="text"
+   279→                  value={playerName}
+   280→                  onChange={(e) => setPlayerName(e.target.value)}
+   281→                  placeholder="Your name"
+   282→                  className="w-full px-3 py-2 bg-black/50 text-white text-sm rounded border border-white/20 mb-3"
+   283→                  maxLength={16}
+   284→                />
+   285→                <button
+   286→                  onClick={handleJoinLan}
+   287→                  disabled={hud.lanStatus === "connecting"}
+   288→                  className="w-full px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white rounded font-bold text-sm disabled:opacity-50"
+   289→                >
+   290→                  {hud.lanStatus === "connecting" ? "Connecting..." : "Join LAN"}
+   291→                </button>
+   292→              </div>
+   293→            )}
+   294→            <button onClick={() => setShowLanPanel(false)} className="w-full mt-3 text-white/60 hover:text-white text-sm">
+   295→              Close
+   296→            </button>
+   297→          </div>
+   298→        </div>
+   299→      )}
+   300→
+   301→      {/* Death overlay */}
+   302→      {hud.locked && hud.dead && (
+   303→        <div className="absolute inset-0 flex items-center justify-center bg-red-900/50 z-30 pointer-events-none">
+   304→          <div className="text-center">
+   305→            <h2 className="text-5xl font-extrabold text-red-300 mb-2" style={{ textShadow: "0 0 10px black" }}>You Died</h2>
+   306→            <p className="text-white/80 text-sm">Respawning in 2 seconds...</p>
+   307→          </div>
+   308→        </div>
+   309→      )}
+   310→
+   311→      {/* Inventory menu */}
+   312→      {hud.locked && menuOpen && (
+   313→        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 backdrop-blur-sm">
+   314→          <div className="bg-zinc-900/95 border-2 border-zinc-700 rounded-lg p-5 max-w-3xl w-[92%] max-h-[90vh] overflow-y-auto shadow-2xl">
+   315→            <div className="flex items-center justify-between mb-4">
+   316→              <h2 className="text-white text-xl font-bold">Inventory</h2>
+   317→              <div className="flex items-center gap-3">
+   318→                {foodCount > 0 && (
+   319→                  <button onClick={handleEat} className="text-[11px] px-3 py-1 bg-red-600/60 hover:bg-red-500 text-white rounded border border-red-400/30">
+   320→                    Eat Food ({foodCount})
+   321→                  </button>
+   322→                )}
+   323→                <button onClick={handleNewWorld} className="text-[11px] px-2 py-1 bg-red-700/60 hover:bg-red-600 text-white rounded border border-red-400/30">
+   324→                  New World
+   325→                </button>
+   326→                <button onClick={handleCloseMenu} className="text-white/70 hover:text-white text-2xl leading-none px-2" aria-label="Close">×</button>
+   327→              </div>
+   328→            </div>
+   329→
+   330→            <div className="mb-4">
+   331→              <div className="text-[11px] text-white/60 font-mono mb-1.5">
+   332→                HOTBAR — tap to select, tap two slots to move items
+   333→                {pickedUpSlot !== null && <span className="text-yellow-300 ml-2">(holding item from slot {pickedUpSlot + 1})</span>}
+   334→              </div>
+   335→              <div className="flex gap-1.5 p-2 bg-black/40 rounded">
+   336→                {slots.slice(0, HOTBAR_SIZE).map((s, i) => (
+   337→                  <button
+   338→                    key={i}
+   339→                    onClick={() => handleSlotClick(i)}
+   340→                    onContextMenu={(e) => { e.preventDefault(); handleSelectSlot(i); }}
+   341→                    className={`relative w-12 h-12 rounded border-2 overflow-hidden transition-colors ${
+   342→                      pickedUpSlot === i ? "border-yellow-400 bg-yellow-900/40" :
+   343→                      i === hud.selected ? "border-emerald-400 bg-emerald-900/40" : "border-white/20 bg-black/40 hover:border-white/50"
+   344→                    }`}
+   345→                    title={s.id !== BlockType.AIR ? `${BLOCKS[s.id]?.name ?? "Item"} x${s.count}` : "Empty"}
+   346→                  >
+   347→                    {s.id !== BlockType.AIR && (
+   348→                      <img src={blockIcon(s.id)} alt="" width={48} height={48} draggable={false}
+   349→                        style={{ width: 48, height: 48, imageRendering: "pixelated", display: "block" }} />
+   350→                    )}
+   351→                    {s.id !== BlockType.AIR && s.count > 1 && (
+   352→                      <span className="absolute bottom-0 right-1 text-[10px] font-mono font-bold text-white"
+   353→                        style={{ textShadow: "0 0 2px black, 0 0 2px black" }}>{s.count}</span>
+   354→                    )}
+   355→                    <span className="absolute bottom-0 left-1 text-[9px] font-mono text-white/50"
+   356→                      style={{ textShadow: "0 0 2px black" }}>{i + 1}</span>
+   357→                  </button>
+   358→                ))}
+   359→              </div>
+   360→            </div>
+   361→
+   362→            <div className="mb-4">
+   363→              <div className="text-[11px] text-white/60 font-mono mb-1.5">MAIN INVENTORY</div>
+   364→              <div className="flex flex-wrap gap-1.5 p-2 bg-black/40 rounded">
+   365→                {slots.slice(HOTBAR_SIZE).map((s, i) => {
+   366→                  const slotIndex = i + HOTBAR_SIZE;
+   367→                  return (
+   368→                    <button
+   369→                      key={i}
+   370→                      onClick={() => handleSlotClick(slotIndex)}
+   371→                      className={`relative w-12 h-12 rounded border-2 overflow-hidden transition-colors ${
+   372→                        pickedUpSlot === slotIndex ? "border-yellow-400 bg-yellow-900/40" : "border-white/15 bg-black/40 hover:border-white/50"
+   373→                      }`}
+   374→                      title={s.id !== BlockType.AIR ? `${BLOCKS[s.id]?.name ?? "Item"} x${s.count}` : "Empty"}
+   375→                    >
+   376→                      {s.id !== BlockType.AIR && (
+   377→                        <>
+   378→                          <img src={blockIcon(s.id)} alt="" width={48} height={48} draggable={false}
+   379→                            style={{ width: 48, height: 48, imageRendering: "pixelated", display: "block" }} />
+   380→                          {s.count > 1 && (
+   381→                            <span className="absolute bottom-0 right-1 text-[10px] font-mono font-bold text-white"
+   382→                              style={{ textShadow: "0 0 2px black, 0 0 2px black" }}>{s.count}</span>
+   383→                          )}
+   384→                        </>
+   385→                      )}
+   386→                    </button>
+   387→                  );
+   388→                })}
+   389→              </div>
+   390→            </div>
+   391→
+   392→            <div className="text-[11px] text-white/60 font-mono mb-1.5">BASIC CRAFTING (no table needed)</div>
+   393→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+   394→              {BASIC_RECIPES.map((recipe) => {
+   395→                const can = recipe.ingredients.every((ing) => invCount(ing.id) >= ing.count);
+   396→                return (
+   397→                  <div key={recipe.id} className={`flex items-center gap-3 p-2.5 rounded border ${
+   398→                    can ? "bg-emerald-900/30 border-emerald-600/50" : "bg-zinc-800/50 border-zinc-700/50 opacity-60"
+   399→                  }`}>
+   400→                    <div className="flex items-center gap-1 flex-1">
+   401→                      <span className="text-[10px] text-white/50 font-mono mr-1">IN:</span>
+   402→                      {recipe.ingredients.map((ing, i) => (
+   403→                        <div key={i} className="flex items-center gap-0.5">
+   404→                          <div className="relative w-7 h-7 bg-black/40 border border-white/15 rounded-sm overflow-hidden">
+   405→                            <img src={blockIcon(ing.id)} alt="" width={28} height={28} draggable={false}
+   406→                              style={{ width: 28, height: 28, imageRendering: "pixelated", display: "block" }} />
+   407→                          </div>
+   408→                          <span className={`text-xs font-mono ${invCount(ing.id) >= ing.count ? "text-emerald-300" : "text-red-300"}`}>
+   409→                            ×{ing.count}
+   410→                          </span>
+   411→                        </div>
+   412→                      ))}
+   413→                    </div>
+   414→                    <span className="text-white/40 text-lg">→</span>
+   415→                    <div className="flex items-center gap-0.5">
+   416→                      <div className="relative w-8 h-8 bg-black/40 border border-white/20 rounded-sm overflow-hidden">
+   417→                        <img src={blockIcon(recipe.output.id)} alt="" width={32} height={32} draggable={false}
+   418→                          style={{ width: 32, height: 32, imageRendering: "pixelated", display: "block" }} />
+   419→                      </div>
+   420→                      <span className="text-sm font-mono text-emerald-300">×{recipe.output.count}</span>
+   421→                    </div>
+   422→                    <button
+   423→                      onClick={() => handleCraft(recipe)}
+   424→                      disabled={!can}
+   425→                      className={`ml-auto px-3 py-1.5 rounded text-xs font-bold transition-colors ${
+   426→                        can ? "bg-emerald-500 hover:bg-emerald-400 text-white cursor-pointer" : "bg-zinc-700 text-zinc-400 cursor-not-allowed"
+   427→                      }`}
+   428→                    >
+   429→                      CRAFT
+   430→                    </button>
+   431→                  </div>
+   432→                );
+   433→              })}
+   434→            </div>
+   435→
+   436→            <div className="mt-4 text-[11px] text-white/50 font-mono leading-relaxed">
+   437→              Tap the right side to place blocks or attack mobs. Long-press to break.
+   438→              Tap a bed to skip the night. Select a sword in the hotbar for double attack damage.
+   439→              Craft a crafting table (4 Wood) and place it, then tap it to access all recipes.
+   440→              Craft torches to light up the dark.
+   441→            </div>
+   442→          </div>
+   443→        </div>
+   444→      )}
+   445→
+   446→      {/* Crafting Table UI — shows ALL recipes */}
+   447→      {hud.locked && craftTableOpen && (
+   448→        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 backdrop-blur-sm">
+   449→          <div className="bg-zinc-900/95 border-2 border-amber-700 rounded-lg p-5 max-w-3xl w-[92%] max-h-[90vh] overflow-y-auto shadow-2xl">
+   450→            <div className="flex items-center justify-between mb-4">
+   451→              <h2 className="text-white text-xl font-bold">Crafting Table</h2>
+   452→              <button onClick={handleCloseCraftTable} className="text-white/70 hover:text-white text-2xl leading-none px-2" aria-label="Close">×</button>
+   453→            </div>
+   454→
+   455→            {/* Inventory summary */}
+   456→            <div className="mb-4">
+   457→              <div className="text-[11px] text-white/60 font-mono mb-1.5">INVENTORY</div>
+   458→              <div className="flex flex-wrap gap-1.5 p-2 bg-black/40 rounded">
+   459→                {slots.map((s, i) => (
+   460→                  <div
+   461→                    key={i}
+   462→                    className="relative w-12 h-12 rounded border border-white/15 bg-black/40 overflow-hidden"
+   463→                    title={s.id !== BlockType.AIR ? `${BLOCKS[s.id]?.name ?? "Item"} x${s.count}` : "Empty"}
+   464→                  >
+   465→                    {s.id !== BlockType.AIR && (
+   466→                      <>
+   467→                        <img src={blockIcon(s.id)} alt="" width={48} height={48} draggable={false}
+   468→                          style={{ width: 48, height: 48, imageRendering: "pixelated", display: "block" }} />
+   469→                        {s.count > 1 && (
+   470→                          <span className="absolute bottom-0 right-1 text-[10px] font-mono font-bold text-white"
+   471→                            style={{ textShadow: "0 0 2px black, 0 0 2px black" }}>{s.count}</span>
+   472→                        )}
+   473→                      </>
+   474→                    )}
+   475→                  </div>
+   476→                ))}
+   477→              </div>
+   478→            </div>
+   479→
+   480→            {/* ALL recipes */}
+   481→            <div className="text-[11px] text-white/60 font-mono mb-1.5">ALL RECIPES</div>
+   482→            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+   483→              {RECIPES.map((recipe) => {
+   484→                const can = recipe.ingredients.every((ing) => invCount(ing.id) >= ing.count);
+   485→                return (
+   486→                  <div key={recipe.id} className={`flex items-center gap-3 p-2.5 rounded border ${
+   487→                    can ? "bg-emerald-900/30 border-emerald-600/50" : "bg-zinc-800/50 border-zinc-700/50 opacity-60"
+   488→                  }`}>
+   489→                    <div className="flex items-center gap-1 flex-1">
+   490→                      <span className="text-[10px] text-white/50 font-mono mr-1">IN:</span>
+   491→                      {recipe.ingredients.map((ing, i) => (
+   492→                        <div key={i} className="flex items-center gap-0.5">
+   493→                          <div className="relative w-7 h-7 bg-black/40 border border-white/15 rounded-sm overflow-hidden">
+   494→                            <img src={blockIcon(ing.id)} alt="" width={28} height={28} draggable={false}
+   495→                              style={{ width: 28, height: 28, imageRendering: "pixelated", display: "block" }} />
+   496→                          </div>
+   497→                          <span className={`text-xs font-mono ${invCount(ing.id) >= ing.count ? "text-emerald-300" : "text-red-300"}`}>
+   498→                            ×{ing.count}
+   499→                          </span>
+   500→                        </div>
+   501→                      ))}
+   502→                    </div>
+   503→                    <span className="text-white/40 text-lg">→</span>
+   504→                    <div className="flex items-center gap-0.5">
+   505→                      <div className="relative w-8 h-8 bg-black/40 border border-white/20 rounded-sm overflow-hidden">
+   506→                        <img src={blockIcon(recipe.output.id)} alt="" width={32} height={32} draggable={false}
+   507→                          style={{ width: 32, height: 32, imageRendering: "pixelated", display: "block" }} />
+   508→                      </div>
+   509→                      <span className="text-sm font-mono text-emerald-300">×{recipe.output.count}</span>
+   510→                    </div>
+   511→                    <button
+   512→                      onClick={() => handleCraft(recipe)}
+   513→                      disabled={!can}
+   514→                      className={`ml-auto px-3 py-1.5 rounded text-xs font-bold transition-colors ${
+   515→                        can ? "bg-emerald-500 hover:bg-emerald-400 text-white cursor-pointer" : "bg-zinc-700 text-zinc-400 cursor-not-allowed"
+   516→                      }`}
+   517→                    >
+   518→                      CRAFT
+   519→                    </button>
+   520→                  </div>
+   521→                );
+   522→              })}
+   523→            </div>
+   524→            <div className="mt-4 text-[11px] text-white/50 font-mono leading-relaxed">
+   525→              The crafting table gives access to all recipes. Basic recipes
+   526→              (planks, torches, cobblestone, crafting table) can be crafted
+   527→              from the inventory without a table.
+   528→            </div>
+   529→          </div>
+   530→        </div>
+   531→      )}
+   532→
+   533→      {/* Intro */}
+   534→      {!hud.locked && (
+   535→        <div className="absolute inset-0 flex flex-col items-center justify-center text-center bg-black/55 backdrop-blur-md z-30">
+   536→          <h1 className="text-5xl sm:text-6xl font-extrabold tracking-tight text-white drop-shadow-[0_3px_8px_rgba(0,0,0,0.6)]">
+   537→            <span className="text-emerald-400">Mine</span>craft.js
+   538→          </h1>
+   539→          <p className="mt-3 text-white/80 text-sm sm:text-base max-w-md">
+   540→            Minimal voxel sandbox. Mobs, torches, swords, beds, crafting, LAN
+   541→            multiplayer, life system, and persistence.
+   542→          </p>
+   543→          {hud.saveStatus === "loaded" && (
+   544→            <p className="mt-3 text-emerald-300 text-sm font-mono">💾 Saved game loaded</p>
+   545→          )}
+   546→          <button onClick={handlePlay} className="mt-7 px-7 py-3 bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-white text-lg font-bold rounded-md shadow-lg transition-colors">
+   547→            {hud.saveStatus === "loaded" ? "Continue" : "Tap to Play"}
+   548→          </button>
+   549→          <div className="mt-8 grid grid-cols-2 gap-x-10 gap-y-2 text-white/85 text-sm font-mono">
+   550→            <div><span className="text-emerald-300">Left stick</span> — Move</div>
+   551→            <div><span className="text-emerald-300">Right drag</span> — Look</div>
+   552→            <div><span className="text-emerald-300">Right tap</span> — Place / Attack</div>
+   553→            <div><span className="text-emerald-300">Right hold</span> — Break</div>
+   554→            <div><span className="text-emerald-300">Sword</span> — Double damage</div>
+   555→            <div><span className="text-emerald-300">Bed</span> — Skip night</div>
+   556→            <div><span className="text-emerald-300">Craft Table</span> — All recipes</div>
+   557→            <div><span className="text-emerald-300">CRAFT btn</span> — Basic recipes</div>
+   558→            <div><span className="text-emerald-300">EAT btn</span> — Eat food to heal</div>
+   559→            <div><span className="text-emerald-300">🌐 LAN</span> — Multiplayer</div>
+   560→          </div>
+   561→        </div>
+   562→      )}
+   563→    </div>
+   564→  );
+   565→}
+   566→
