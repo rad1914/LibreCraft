@@ -23,13 +23,7 @@ export class HungerSystem {
   private starveTimer = 0;
 
   onFoodChange?: (food: number) => void;
-  onRegen?: (amount: number) => void;
-  onStarve?: (amount: number) => void;
 
-  get maxFood(): number { return MAX_FOOD; }
-  get isFull(): boolean { return this.food >= REGEN_FOOD_THRESHOLD; }
-  get isLow(): boolean { return this.food < SLOW_FOOD_THRESHOLD; }
-  get isStarving(): boolean { return this.food <= STARVE_FOOD_THRESHOLD; }
   get shouldSlow(): boolean { return this.food < SLOW_FOOD_THRESHOLD; }
 
   reset() {
@@ -81,7 +75,6 @@ export class HungerSystem {
       if (this.regenTimer >= REGEN_INTERVAL) {
         this.regenTimer -= REGEN_INTERVAL;
         events.regen = 1;
-        this.onRegen?.(1);
       }
     } else {
       this.regenTimer = 0;
@@ -93,7 +86,6 @@ export class HungerSystem {
       if (this.starveTimer >= STARVE_INTERVAL) {
         this.starveTimer -= STARVE_INTERVAL;
         events.starve = 1;
-        this.onStarve?.(1);
       }
     } else {
       this.starveTimer = 0;

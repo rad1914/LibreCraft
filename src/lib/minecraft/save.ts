@@ -13,6 +13,15 @@
 import type { InvSlot } from "./inventory";
 
 const SAVE_KEY = "mcjs_save_v3";
+const GRAVES_KEY = "mcjs_graves_v1";
+
+export interface GraveEntry {
+  x: number;
+  y: number;
+  z: number;
+  items: InvSlot[];
+  timestamp: number;
+}
 
 export interface SaveData {
   version: 3;
@@ -81,10 +90,56 @@ export function clearSave(): boolean {
   }
 }
 
-export function hasSave(): boolean {
+// --- Graveyard: stores items dropped on death, keyed by grave position. ---
+
+export function saveGrave(grave: GraveEntry): boolean {
   if (typeof window === "undefined") return false;
   try {
-    return window.localStorage.getItem(SAVE_KEY) !== null;
+    const graves = loadGraves();
+    const key = `${grave.x},${grave.y},${grave.z}`;
+    graves[key] = grave;
+    window.localStorage.setItem(GRAVES_KEY, JSON.stringify(graves));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadGraves(): Record<string, GraveEntry> {
+  if (typeof window === "undefined") return {};
+  try {
+    const json = window.localStorage.getItem(GRAVES_KEY);
+    if (!json) return {};
+    return JSON.parse(json) as Record<string, GraveEntry>;
+  } catch {
+    return {};
+  }
+}
+
+export function loadGrave(x: number, y: number, z: number): GraveEntry | null {
+  const graves = loadGraves();
+  return graves[`${x},${y},${z}`] ?? null;
+}
+
+export function removeGrave(x: number, y: number, z: number): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const graves = loadGraves();
+    const key = `${x},${y},${z}`;
+    if (!(key in graves)) return false;
+    delete graves[key];
+    window.localStorage.setItem(GRAVES_KEY, JSON.stringify(graves));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearGraves(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.removeItem(GRAVES_KEY);
+    return true;
   } catch {
     return false;
   }

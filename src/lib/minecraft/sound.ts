@@ -146,7 +146,7 @@ export function playStep() {
   noise.buffer = getNoiseBuffer(c);
   const g = c.createGain();
   g.gain.setValueAtTime(0.0001, now);
-  g.gain.exponentialRampToValueAtTime(0.06, now + 0.003);
+  g.gain.exponentialRampToValueAtTime(0.12, now + 0.003);
   g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
   const filter = c.createBiquadFilter();
   filter.type = "lowpass";
@@ -215,57 +215,139 @@ export function playEat() {
   }
 }
 
-// --- Background music (file-based) ---
-// Background music: plays audio files from /public/music/ in sequence.
-// If no files are found, the game runs silently. startMusic() loads
-// the track list on first call and cycles through them.
-
-let musicAudio: HTMLAudioElement | null = null;
-let musicTracks: string[] | null = null;
-let musicIndex = 0;
-
-const MUSIC_FILES = [
-  "/music/track1.mp3",
-  "/music/track2.mp3",
-  "/music/track3.mp3",
-];
-
-export function startMusic() {
-  if (musicAudio) return; // already playing
-  if (musicTracks === null) {
-    musicTracks = MUSIC_FILES;
-    musicIndex = 0;
-  }
-  playCurrentTrack();
+// Portal formation sound — ancient-spooky: deep descending drone with
+// reverb-ish decay and a high shimmer. Plays when a portal ring completes.
+export function playPortalForm() {
+  const c = getCtx();
+  if (!c) return;
+  const now = c.currentTime;
+  // Deep drone — low frequency oscillator fading out over ~1.5s.
+  const drone = c.createOscillator();
+  drone.type = "sawtooth";
+  drone.frequency.setValueAtTime(110, now);
+  drone.frequency.exponentialRampToValueAtTime(40, now + 1.2);
+  const droneGain = c.createGain();
+  droneGain.gain.setValueAtTime(0.0001, now);
+  droneGain.gain.exponentialRampToValueAtTime(0.2, now + 0.05);
+  droneGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.5);
+  const droneFilter = c.createBiquadFilter();
+  droneFilter.type = "lowpass";
+  droneFilter.frequency.setValueAtTime(400, now);
+  drone.connect(droneFilter).connect(droneGain).connect(c.destination);
+  drone.start(now);
+  drone.stop(now + 1.6);
+  // High shimmer — a high sine sweep that gives an eerie ring.
+  const shimmer = c.createOscillator();
+  shimmer.type = "sine";
+  shimmer.frequency.setValueAtTime(1200, now);
+  shimmer.frequency.exponentialRampToValueAtTime(2400, now + 0.8);
+  const shimmerGain = c.createGain();
+  shimmerGain.gain.setValueAtTime(0.0001, now);
+  shimmerGain.gain.exponentialRampToValueAtTime(0.06, now + 0.1);
+  shimmerGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.0);
+  shimmer.connect(shimmerGain).connect(c.destination);
+  shimmer.start(now);
+  shimmer.stop(now + 1.1);
+  // Noise wash — filtered noise for an ambient "whoosh" underneath.
+  const noise = c.createBufferSource();
+  noise.buffer = getNoiseBuffer(c);
+  const noiseGain = c.createGain();
+  noiseGain.gain.setValueAtTime(0.0001, now);
+  noiseGain.gain.exponentialRampToValueAtTime(0.1, now + 0.1);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
+  const noiseFilter = c.createBiquadFilter();
+  noiseFilter.type = "bandpass";
+  noiseFilter.frequency.setValueAtTime(300, now);
+  noiseFilter.frequency.exponentialRampToValueAtTime(800, now + 0.8);
+  noise.connect(noiseFilter).connect(noiseGain).connect(c.destination);
+  noise.start(now);
+  noise.stop(now + 1.3);
 }
 
-function playCurrentTrack() {
-  if (!musicTracks || musicTracks.length === 0) return;
-  const src = musicTracks[musicIndex];
-  musicAudio = new Audio(src);
-  musicAudio.volume = 0.3;
-  musicAudio.loop = false;
-  musicAudio.addEventListener("ended", () => {
-    musicIndex = (musicIndex + 1) % musicTracks.length;
-    musicAudio = null;
-    playCurrentTrack();
-  });
-  musicAudio.addEventListener("error", () => {
-    // File not found — skip to next track
-    musicIndex = (musicIndex + 1) % musicTracks.length;
-    musicAudio = null;
-    // Only retry if we haven't cycled through all tracks
-    playCurrentTrack();
-  });
-  musicAudio.play().catch(() => {
-    // Autoplay blocked — will retry on next user interaction
-    musicAudio = null;
-  });
+// Portal ambient sound — a brief spooky whisper that plays occasionally
+// when the player is near a portal block. Quieter and shorter than the
+// formation sound, so it doesn't get annoying as a repeating ambient.
+export function playPortalAmbient() {
+  const c = getCtx();
+  if (!c) return;
+  const now = c.currentTime;
+  // Low rumble — short.
+  const osc = c.createOscillator();
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(80, now);
+  osc.frequency.exponentialRampToValueAtTime(50, now + 0.4);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(0.08, now + 0.05);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+  osc.connect(g).connect(c.destination);
+  osc.start(now);
+  osc.stop(now + 0.55);
+  // Faint noise breath.
+  const noise = c.createBufferSource();
+  noise.buffer = getNoiseBuffer(c);
+  const ng = c.createGain();
+  ng.gain.setValueAtTime(0.0001, now);
+  ng.gain.exponentialRampToValueAtTime(0.04, now + 0.05);
+  ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+  const nf = c.createBiquadFilter();
+  nf.type = "bandpass";
+  nf.frequency.setValueAtTime(500, now);
+  noise.connect(nf).connect(ng).connect(c.destination);
+  noise.start(now);
+  noise.stop(now + 0.45);
 }
 
-export function stopMusic() {
-  if (musicAudio) {
-    musicAudio.pause();
-    musicAudio = null;
+// Ultra-rare spooky glitchy sound — plays very occasionally at night or
+// while mining deep underground. A disjointed, eerie texture: detuned
+// oscillators, reversed-feeling noise sweeps, and random pitch jumps
+// that feel "wrong". Designed to be unsettling without being jump-scare loud.
+export function playSpookyGlitch() {
+  const c = getCtx();
+  if (!c) return;
+  const now = c.currentTime;
+  // Three detuned sine drones at dissonant intervals — creates an
+  // unsettling "beating" pattern.
+  const freqs = [73, 77, 83]; // slightly off from harmonic ratios
+  for (let i = 0; i < freqs.length; i++) {
+    const osc = c.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freqs[i], now);
+    // Random pitch jump mid-way — the "glitch".
+    osc.frequency.setValueAtTime(freqs[i] * 1.5, now + 0.3 + Math.random() * 0.4);
+    osc.frequency.exponentialRampToValueAtTime(freqs[i] * 0.5, now + 1.5);
+    const g = c.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.04, now + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 1.6);
+    osc.connect(g).connect(c.destination);
+    osc.start(now);
+    osc.stop(now + 1.7);
   }
+  // Reversed-feeling noise sweep — bandpass filter sweeping downward.
+  const noise = c.createBufferSource();
+  noise.buffer = getNoiseBuffer(c);
+  const ng = c.createGain();
+  ng.gain.setValueAtTime(0.0001, now);
+  ng.gain.exponentialRampToValueAtTime(0.05, now + 0.1);
+  ng.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
+  const nf = c.createBiquadFilter();
+  nf.type = "bandpass";
+  nf.frequency.setValueAtTime(2000, now);
+  nf.frequency.exponentialRampToValueAtTime(150, now + 1.0);
+  nf.Q.value = 8; // sharp resonance for an eerie whistle
+  noise.connect(nf).connect(ng).connect(c.destination);
+  noise.start(now);
+  noise.stop(now + 1.3);
+  // A single high "ping" that decays slowly — like a distant bell.
+  const ping = c.createOscillator();
+  ping.type = "sine";
+  ping.frequency.setValueAtTime(1800 + Math.random() * 400, now + 0.5);
+  const pg = c.createGain();
+  pg.gain.setValueAtTime(0.0001, now + 0.5);
+  pg.gain.exponentialRampToValueAtTime(0.03, now + 0.55);
+  pg.gain.exponentialRampToValueAtTime(0.0001, now + 1.4);
+  ping.connect(pg).connect(c.destination);
+  ping.start(now + 0.5);
+  ping.stop(now + 1.5);
 }

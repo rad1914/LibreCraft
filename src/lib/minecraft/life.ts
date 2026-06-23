@@ -10,6 +10,7 @@ const MAX_HEALTH = 20;
 const SAFE_FALL = 3; // blocks — falls <= this deal no damage
 const DAMAGE_PER_BLOCK = 1; // per block beyond SAFE_FALL
 const RESPAWN_HEALTH = MAX_HEALTH;
+const RESPAWN_INVINCIBILITY = 1.0; // seconds of invincibility after respawn
 
 export class LifeSystem {
   health = MAX_HEALTH;
@@ -18,16 +19,21 @@ export class LifeSystem {
   private fallStartY: number | null = null;
   private wasOnGround = true;
   dead = false;
+  // Invincibility timer — counts down after respawn. While > 0, the
+  // player takes no damage. Gives a brief grace period so the player
+  // doesn't instantly die again to whatever killed them.
+  invincibleTimer = 0;
 
   // Callbacks
   onHealthChange?: (health: number) => void;
   onDeath?: () => void;
   onRespawn?: () => void;
-  onDamage?: (amount: number) => void;
 
   // Call every frame with the player's current position and onGround state.
   update(currentY: number, onGround: boolean) {
     if (this.dead) return;
+    // Tick down the invincibility timer.
+    if (this.invincibleTimer > 0) this.invincibleTimer -= 1 / 60;
 
     if (onGround && !this.wasOnGround) {
       // Just landed — compute fall damage
@@ -55,8 +61,9 @@ export class LifeSystem {
 
   takeDamage(amount: number) {
     if (this.dead) return;
+    // Invincibility: ignore all damage while the timer is active.
+    if (this.invincibleTimer > 0) return;
     this.health = Math.max(0, this.health - amount);
-    this.onDamage?.(amount);
     this.onHealthChange?.(this.health);
     if (this.health <= 0) {
       this.die();
@@ -68,12 +75,14 @@ export class LifeSystem {
     this.onDeath?.();
   }
 
-  // Respawn at the given spawn point.
+  // Respawn at the given spawn point. Grants 1 second of invincibility
+  // so the player can reorient without instantly dying again.
   respawn(player: { position: THREE.Vector3; yaw: number; pitch: number }, spawnPoint: THREE.Vector3, world: World) {
     this.health = RESPAWN_HEALTH;
     this.dead = false;
     this.fallStartY = null;
     this.wasOnGround = true;
+    this.invincibleTimer = RESPAWN_INVINCIBILITY;
     player.position.copy(spawnPoint);
     player.yaw = 0;
     player.pitch = 0;
@@ -86,6 +95,7 @@ export class LifeSystem {
     this.dead = false;
     this.fallStartY = null;
     this.wasOnGround = true;
+    this.invincibleTimer = 0;
     this.onHealthChange?.(this.health);
   }
 }

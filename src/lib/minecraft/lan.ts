@@ -17,13 +17,39 @@ export interface RemotePlayer {
   mesh: THREE.Group;
 }
 
+// Ray-vs-entity hit test used for attacking mobs and remote players.
+// `yLift` raises the sampled center above the entity's feet (player eyes).
+function rayHitsEntity<E extends { x: number; y: number; z: number }>(
+  entities: Iterable<E>,
+  rayOrigin: THREE.Vector3,
+  rayDir: THREE.Vector3,
+  maxDist: number,
+  yLift: number,
+  threshold = 0.92,
+): E | null {
+  let closest: E | null = null;
+  let closestDist = maxDist;
+  for (const e of entities) {
+    const dx = e.x - rayOrigin.x;
+    const dy = (e.y + yLift) - rayOrigin.y;
+    const dz = e.z - rayOrigin.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > closestDist) continue;
+    const dot = (dx * rayDir.x + dy * rayDir.y + dz * rayDir.z) / (dist || 1);
+    if (dot > threshold) {
+      closest = e;
+      closestDist = dist;
+    }
+  }
+  return closest;
+}
+
 export interface LanClientCallbacks {
   onConnected?: () => void;
   onDisconnected?: () => void;
   onPlayersChange?: (players: RemotePlayer[]) => void;
   onRemoteBlock?: (x: number, y: number, z: number, id: number) => void;
   onChat?: (sender: string, message: string) => void;
-  onPlayerHealthChange?: (id: string, health: number) => void;
   onDamageReceived?: (amount: number, fromId: string, fromName: string) => void;
 }
 
@@ -39,33 +65,28 @@ export class LanClient {
   private myName = "Player";
   private connected = false;
   private moveTimer = 0;
-  private healthBroadcastTimer = 0;
-  private lastHealth = REMOTE_PLAYER_MAX_HEALTH;
 
   constructor(scene: THREE.Scene, callbacks: LanClientCallbacks = {}) {
     this.scene = scene;
     this.callbacks = callbacks;
   }
 
+  // Host: connect via the Caddy gateway on port 81 with XTransformPort=3003.
   connect(name: string, port: number = 3003): boolean {
-    if (this.socket) this.disconnect();
-    this.myName = name || "Player";
-
-    // Host: connect to the local LAN server via the Caddy gateway.
-    const url = `http://${window.location.hostname}:81/?XTransformPort=${port}`;
-    return this.doConnect(url);
+    return this.connectUrl(
+      `http://${window.location.hostname}:81/?XTransformPort=${port}`,
+      name
+    );
   }
 
-  // Join: connect to a specific host address (e.g., "192.168.1.5:3003").
+  // Join: connect directly to a host address (e.g. "192.168.1.5:3003").
   joinHost(name: string, hostAddress: string): boolean {
-    if (this.socket) this.disconnect();
-    this.myName = name || "Player";
-    // Try direct connection to the host address
-    const url = `http://${hostAddress}`;
-    return this.doConnect(url);
+    return this.connectUrl(`http://${hostAddress}`, name);
   }
 
-  private doConnect(url: string): boolean {
+  private connectUrl(url: string, name: string): boolean {
+    if (this.socket) this.disconnect();
+    this.myName = name || "Player";
     try {
       this.socket = io(url, {
         transports: ["websocket"],
@@ -114,7 +135,7 @@ export class LanClient {
     });
 
     // Player moved
-    this.socket.on("player-moved", (p: Omit<RemotePlayer, "mesh" | "health"> & { health?: number }) => {
+    this.socket.on("player-moved", (p: Omit<RemotePlayer, "mesh"> & { health?: number }) => {
       if (p.id === this.myId) return;
       const existing = this.players.get(p.id);
       if (existing) {
@@ -125,10 +146,7 @@ export class LanClient {
         existing.pitch = p.pitch;
         existing.mesh.position.set(p.x, p.y, p.z);
         existing.mesh.rotation.y = p.yaw;
-        if (typeof p.health === "number" && p.health !== existing.health) {
-          existing.health = p.health;
-          this.callbacks.onPlayerHealthChange?.(p.id, p.health);
-        }
+        if (typeof p.health === "number") existing.health = p.health;
       }
     });
 
@@ -180,18 +198,6 @@ export class LanClient {
     this.callbacks.onPlayersChange?.(Array.from(this.players.values()));
   }
 
-  isConnected(): boolean {
-    return this.connected;
-  }
-
-  getMyId(): string | null {
-    return this.myId;
-  }
-
-  getMyName(): string {
-    return this.myName;
-  }
-
   // Send local player position to the server (throttled).
   update(dt: number, x: number, y: number, z: number, yaw: number, pitch: number) {
     if (!this.socket || !this.connected) return;
@@ -221,37 +227,10 @@ export class LanClient {
     this.socket.emit("damage", { target: targetId, amount });
   }
 
-  // Broadcast our local health to the server periodically so other
-  // clients can render it / know when we died. Called by the engine
-  // each frame; throttled internally.
-  broadcastHealth(dt: number, health: number) {
-    if (!this.socket || !this.connected) return;
-    this.healthBroadcastTimer += dt;
-    if (health !== this.lastHealth || this.healthBroadcastTimer >= 1.0) {
-      this.socket.emit("health", { health });
-      this.lastHealth = health;
-      this.healthBroadcastTimer = 0;
-    }
-  }
-
   // Raycast hit test against remote players: returns the closest remote
   // player the ray points at, within maxDist. Used for attacking players.
   getPlayerAt(rayOrigin: THREE.Vector3, rayDir: THREE.Vector3, maxDist: number): RemotePlayer | null {
-    let closest: RemotePlayer | null = null;
-    let closestDist = maxDist;
-    for (const p of this.players.values()) {
-      const dx = p.x - rayOrigin.x;
-      const dy = (p.y + 0.8) - rayOrigin.y; // aim at player center
-      const dz = p.z - rayOrigin.z;
-      const dist = Math.hypot(dx, dy, dz);
-      if (dist > closestDist) continue;
-      const dot = (dx * rayDir.x + dy * rayDir.y + dz * rayDir.z) / (dist || 1);
-      if (dot > 0.92) { // within ~23 degrees of the player
-        closest = p;
-        closestDist = dist;
-      }
-    }
-    return closest;
+    return rayHitsEntity(this.players.values(), rayOrigin, rayDir, maxDist, 0.8);
   }
 
   disconnect() {
@@ -279,7 +258,7 @@ function disposeGroup(group: THREE.Group) {
 }
 
 // Build a multi-part player model (Steve-like figure with head, body, arms, legs).
-function buildPlayerModel(color: number, name: string): THREE.Group {
+function buildPlayerModel(color: number, _name: string): THREE.Group {
   const group = new THREE.Group();
   const main = new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.25 });
   const skin = new THREE.MeshLambertMaterial({ color: 0xf0c090, emissive: 0x332211, emissiveIntensity: 0.15 });

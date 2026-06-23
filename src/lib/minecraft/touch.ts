@@ -2,14 +2,13 @@
 // drive the joystick/look/buttons. On desktop, mouse events are mapped
 // to the same handlers.
 //
-// Layout:
-//   - Left half of the screen: virtual movement joystick.
+// Layout (modern, uniform design — all buttons share the same glassy
+// dark-blur style with rounded corners and consistent sizing):
+//   - Left half of the screen: virtual movement joystick (floating).
 //   - Right half of the screen: look drag + tap-to-place + long-press-to-break.
-//     A quick tap on the look zone places the selected block at the
-//     raycast hit. A long press (hold without dragging) breaks the
-//     targeted block.
-//   - Bottom-left buttons: SPRINT toggle, JUMP (hold).
-//   - Bottom-right button: CRAFT (opens unified inventory menu).
+//   - Bottom-right: large JUMP button (primary action).
+//   - Bottom-left cluster: SPRINT + CRAFT buttons.
+//   - Top-center: CHAT button.
 //   - Bottom-center: hotbar 1..9 (tap to select).
 //
 // There is no crosshair, no BREAK button, no PLACE button.
@@ -43,12 +42,20 @@ interface PointerState {
   lastX: number;
   lastY: number;
   startTime: number;
-  moved: boolean; // true if the pointer moved beyond the tap threshold
+  moved: boolean;
 }
 
-const TAP_MAX_DIST = 8; // px — beyond this, it's a drag, not a tap
-const TAP_MAX_TIME = 250; // ms — quick tap = place
-const LONG_PRESS_TIME = 350; // ms — hold this long = break starts
+const TAP_MAX_DIST = 8;
+const TAP_MAX_TIME = 250;
+const LONG_PRESS_TIME = 350;
+
+// Shared style constants — uniform "modern glass" look across all controls.
+const GLASS_BG = "rgba(20, 24, 32, 0.55)";
+const GLASS_BG_ACTIVE = "rgba(40, 80, 130, 0.75)";
+const GLASS_BORDER = "1.5px solid rgba(255, 255, 255, 0.18)";
+const GLASS_SHADOW = "0 4px 14px rgba(0, 0, 0, 0.35)";
+const GLASS_BLUR = "backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);";
+const FONT_FAMILY = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
 export function createTouchControls(
   container: HTMLElement,
@@ -58,39 +65,68 @@ export function createTouchControls(
 ): TouchController {
   const ui = document.createElement("div");
   ui.className = "mc-touch-ui";
-  ui.style.position = "absolute";
-  ui.style.inset = "0";
-  ui.style.pointerEvents = "none";
-  ui.style.zIndex = "20";
-  ui.style.touchAction = "none";
+  // IMPORTANT: do NOT apply backdrop-filter to this full-screen parent
+  // div — it would blur the entire game canvas behind it. Only individual
+  // buttons (which cover a small area) get the glass blur effect.
+  ui.style.cssText = `position:absolute;inset:0;pointer-events:none;z-index:20;touch-action:none;`;
   ui.innerHTML = `
-    <!-- Left joystick zone -->
-    <div class="mc-joystick-zone" style="position:absolute; left:0; bottom:0; width:50%; height:65%; pointer-events:auto; touch-action:none;">
-      <div class="mc-joystick-base" style="position:absolute; left:60px; bottom:60px; width:120px; height:120px; border-radius:50%; background:rgba(255,255,255,0.12); border:2px solid rgba(255,255,255,0.35); pointer-events:none; opacity:0.5;"></div>
-      <div class="mc-joystick-knob" style="position:absolute; left:100px; bottom:100px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,0.4); border:2px solid rgba(255,255,255,0.7); pointer-events:none; opacity:0.5;"></div>
+    <!-- Left joystick zone (full bottom-left quadrant) -->
+    <div class="mc-joystick-zone" style="position:absolute;left:0;bottom:0;width:50%;height:65%;pointer-events:auto;touch-action:none;">
+      <div class="mc-joystick-base" style="position:absolute;left:60px;bottom:60px;width:120px;height:120px;border-radius:50%;background:${GLASS_BG};border:${GLASS_BORDER};box-shadow:${GLASS_SHADOW};pointer-events:none;opacity:0.55;transition:opacity 0.15s;"></div>
+      <div class="mc-joystick-knob" style="position:absolute;left:100px;bottom:100px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,0.45);border:1.5px solid rgba(255,255,255,0.85);box-shadow:${GLASS_SHADOW};pointer-events:none;opacity:0.55;transition:opacity 0.15s;"></div>
     </div>
 
     <!-- Right interaction zone: look drag + tap-to-place + long-press-to-break -->
-    <div class="mc-look-zone" style="position:absolute; right:0; top:0; width:50%; height:100%; pointer-events:auto; touch-action:none;"></div>
+    <div class="mc-look-zone" style="position:absolute;right:0;top:0;width:50%;height:100%;pointer-events:auto;touch-action:none;"></div>
 
     <!-- CHAT button (top-center) -->
-    <div style="position:absolute; left:50%; top:10px; transform:translateX(-50%); z-index:25; pointer-events:none;">
-      <button class="mc-btn mc-chat" data-act="chat" style="width:68px; height:36px; border-radius:8px; background:rgba(40,150,150,0.6); border:2px solid rgba(255,255,255,0.7); color:white; font-weight:bold; pointer-events:auto; touch-action:none; font-size:12px; cursor:pointer;">CHAT</button>
+    <div style="position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:25;pointer-events:none;">
+      <button class="mc-btn mc-chat" data-act="chat" style="
+        width:72px;height:36px;border-radius:10px;
+        background:${GLASS_BG};border:${GLASS_BORDER};
+        box-shadow:${GLASS_SHADOW};color:rgba(255,255,255,0.95);
+        font:600 12px ${FONT_FAMILY};letter-spacing:0.5px;
+        pointer-events:auto;touch-action:none;cursor:pointer;${GLASS_BLUR}
+      ">CHAT</button>
     </div>
 
-    <!-- Right-side buttons: JUMP only -->
-    <div class="mc-actions" style="position:absolute; right:18px; bottom:110px; display:flex; flex-direction:column; gap:12px; pointer-events:none;">
-      <button class="mc-btn mc-jump" data-act="jump" style="width:72px; height:72px; border-radius:50%; background:rgba(80,140,240,0.6); border:2px solid rgba(255,255,255,0.7); color:white; font-weight:bold; pointer-events:auto; touch-action:none; font-size:14px; cursor:pointer;">JUMP</button>
+    <!-- Right-side action cluster: JUMP (primary, larger) -->
+    <div class="mc-actions" style="position:absolute;right:20px;bottom:104px;display:flex;flex-direction:column;gap:12px;pointer-events:none;">
+      <button class="mc-btn mc-jump" data-act="jump" style="
+        width:80px;height:80px;border-radius:50%;
+        background:rgba(60, 110, 200, 0.55);border:1.5px solid rgba(180, 210, 255, 0.5);
+        box-shadow:${GLASS_SHADOW};color:white;
+        font:700 14px ${FONT_FAMILY};letter-spacing:1px;
+        pointer-events:auto;touch-action:none;cursor:pointer;${GLASS_BLUR}
+      ">JUMP</button>
     </div>
 
-    <!-- Sprint + Craft buttons (bottom-left, above joystick) -->
-    <div class="mc-move-actions" style="position:absolute; left:200px; bottom:110px; display:flex; flex-direction:column; gap:12px; pointer-events:none;">
-      <button class="mc-btn mc-craft" data-act="craft" style="width:56px; height:48px; border-radius:10px; background:rgba(140,90,200,0.65); border:2px solid rgba(255,255,255,0.7); color:white; font-weight:bold; pointer-events:auto; touch-action:none; font-size:11px; cursor:pointer;">CRAFT</button>
-      <button class="mc-btn mc-sprint" data-act="sprint" style="width:56px; height:56px; border-radius:50%; background:rgba(255,200,60,0.55); border:2px solid rgba(255,255,255,0.7); color:white; font-weight:bold; pointer-events:auto; touch-action:none; font-size:11px; cursor:pointer;">SPRINT</button>
+    <!-- Left-side action cluster: SPRINT + SNEAK (CRAFT is now in the hotbar) -->
+    <div class="mc-move-actions" style="position:absolute;left:200px;bottom:108px;display:flex;flex-direction:column;gap:10px;pointer-events:none;">
+      <button class="mc-btn mc-sprint" data-act="sprint" style="
+        width:62px;height:48px;border-radius:12px;
+        background:rgba(255, 180, 60, 0.45);border:1.5px solid rgba(255, 230, 180, 0.45);
+        box-shadow:${GLASS_SHADOW};color:white;
+        font:700 11px ${FONT_FAMILY};letter-spacing:0.8px;
+        pointer-events:auto;touch-action:none;cursor:pointer;${GLASS_BLUR}
+      ">SPRINT</button>
+      <button class="mc-btn mc-sneak" data-act="sneak" style="
+        width:62px;height:48px;border-radius:12px;
+        background:rgba(120, 120, 140, 0.45);border:1.5px solid rgba(200, 200, 220, 0.45);
+        box-shadow:${GLASS_SHADOW};color:white;
+        font:700 11px ${FONT_FAMILY};letter-spacing:0.8px;
+        pointer-events:auto;touch-action:none;cursor:pointer;${GLASS_BLUR}
+      ">SNEAK</button>
     </div>
 
-    <!-- Hotbar (bottom-center) -->
-    <div class="mc-hotbar" style="position:absolute; left:50%; bottom:18px; transform:translateX(-50%); display:flex; gap:5px; padding:5px; background:rgba(0,0,0,0.5); border-radius:8px; pointer-events:auto; touch-action:none;"></div>
+    <!-- Hotbar (bottom-center) — uniform glass panel, with CRAFT as 10th slot -->
+    <div class="mc-hotbar" style="
+      position:absolute;left:50%;bottom:20px;transform:translateX(-50%);
+      display:flex;gap:6px;padding:6px;align-items:center;
+      background:${GLASS_BG};border:${GLASS_BORDER};
+      border-radius:12px;box-shadow:${GLASS_SHADOW};
+      pointer-events:auto;touch-action:none;${GLASS_BLUR}
+    "></div>
   `;
   container.appendChild(ui);
 
@@ -100,10 +136,11 @@ export function createTouchControls(
   for (let i = 0; i < hotbarSlots; i++) {
     const el = document.createElement("button");
     el.dataset.slot = String(i);
+    const selected = i === 0;
     el.style.cssText =
-      "width:48px;height:48px;border-radius:5px;padding:0;overflow:hidden;" +
-      "border:" + (i === 0 ? "2px solid white" : "2px solid rgba(255,255,255,0.25)") + ";" +
-      "background:rgba(0,0,0,0.4);position:relative;cursor:pointer;touch-action:none;";
+      `width:48px;height:48px;border-radius:8px;padding:0;overflow:hidden;` +
+      `border:${selected ? "2px solid rgba(180,210,255,0.95)" : "1.5px solid rgba(255,255,255,0.18)"};` +
+      `background:rgba(0,0,0,0.35);position:relative;cursor:pointer;touch-action:none;transition:border-color 0.12s;`;
     const img = document.createElement("img");
     img.style.cssText = "width:100%;height:100%;display:block;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;";
     img.draggable = false;
@@ -111,17 +148,57 @@ export function createTouchControls(
     const badge = document.createElement("div");
     badge.textContent = String(i + 1);
     badge.style.cssText =
-      "position:absolute;bottom:1px;right:3px;font:bold 10px monospace;" +
-      "color:white;text-shadow:0 0 2px black,0 0 2px black;pointer-events:none;";
+      `position:absolute;bottom:1px;right:3px;font:700 10px ${FONT_FAMILY};` +
+      `color:white;text-shadow:0 0 2px black,0 0 2px black;pointer-events:none;`;
     el.appendChild(badge);
+    // Item count badge (bottom-left) — shown when count > 1.
+    const countBadge = document.createElement("div");
+    countBadge.style.cssText =
+      `position:absolute;bottom:1px;left:3px;font:700 11px ${FONT_FAMILY};` +
+      `color:white;text-shadow:0 0 2px black,0 0 2px black;pointer-events:none;display:none;`;
+    el.appendChild(countBadge);
     hotbarEl.appendChild(el);
     slotEls.push(el);
   }
+
+  // 10th hotbar slot: CRAFT button (visually integrated into the hotbar
+  // as the last slot, styled distinctly with a purple accent and a
+  // separator gap before it).
+  const craftSlot = document.createElement("button");
+  craftSlot.dataset.act = "craft";
+  craftSlot.style.cssText =
+    `width:48px;height:48px;border-radius:8px;padding:0;overflow:hidden;` +
+    `border:1.5px solid rgba(220, 200, 255, 0.5);` +
+    `background:rgba(140, 90, 200, 0.55);position:relative;cursor:pointer;touch-action:none;` +
+    `margin-left:6px;display:flex;align-items:center;justify-content:center;${GLASS_BLUR}`;
+  // Craft icon — a simple grid/plus symbol drawn with CSS
+  const craftIcon = document.createElement("div");
+  craftIcon.style.cssText =
+    `width:22px;height:22px;position:relative;`;
+  craftIcon.innerHTML = `
+    <div style="position:absolute;left:50%;top:0;width:3px;height:100%;background:white;border-radius:1px;transform:translateX(-50%);"></div>
+    <div style="position:absolute;top:50%;left:0;height:3px;width:100%;background:white;border-radius:1px;transform:translateY(-50%);"></div>
+  `;
+  craftSlot.appendChild(craftIcon);
+  hotbarEl.appendChild(craftSlot);
 
   (ui as unknown as { setHotbarIcon: (slot: number, dataUrl: string) => void }).setHotbarIcon = (slot: number, dataUrl: string) => {
     if (slotEls[slot]) {
       const img = slotEls[slot].querySelector("img");
       if (img) img.src = dataUrl;
+    }
+  };
+  (ui as unknown as { setHotbarCount: (slot: number, count: number) => void }).setHotbarCount = (slot: number, count: number) => {
+    if (slotEls[slot]) {
+      const cb = slotEls[slot].querySelectorAll("div")[1] as HTMLElement | null;
+      if (cb) {
+        if (count > 1) {
+          cb.textContent = String(count);
+          cb.style.display = "block";
+        } else {
+          cb.style.display = "none";
+        }
+      }
     }
   };
 
@@ -136,7 +213,6 @@ export function createTouchControls(
   const knob = ui.querySelector<HTMLElement>(".mc-joystick-knob")!;
   const base = ui.querySelector<HTMLElement>(".mc-joystick-base")!;
 
-  // Long-press timer for breaking
   let longPressTimer: number | null = null;
   let isBreaking = false;
 
@@ -199,8 +275,8 @@ export function createTouchControls(
     joystick.active = false;
     joystick.id = -1;
     resetJoystick();
-    base.style.opacity = "0.5";
-    knob.style.opacity = "0.5";
+    base.style.opacity = "0.55";
+    knob.style.opacity = "0.55";
   };
 
   // ---- Look zone: drag to look + tap to place + long-press to break ----
@@ -222,8 +298,6 @@ export function createTouchControls(
     look.startTime = performance.now();
     look.moved = false;
     isBreaking = false;
-    // Start long-press timer; if the pointer doesn't move and isn't
-    // released within LONG_PRESS_TIME, begin breaking.
     clearLongPressTimer();
     longPressTimer = window.setTimeout(() => {
       if (look.active && !look.moved) {
@@ -237,12 +311,10 @@ export function createTouchControls(
     if (!look.active) return;
     const dx = clientX - look.lastX;
     const dy = clientY - look.lastY;
-    // Check if this is a drag (beyond tap threshold)
     const totalDx = clientX - look.startX;
     const totalDy = clientY - look.startY;
     if (Math.hypot(totalDx, totalDy) > TAP_MAX_DIST) {
       look.moved = true;
-      // If we were breaking, cancel (the player is now dragging to look)
       if (isBreaking) {
         isBreaking = false;
         callbacks.onBreakEnd();
@@ -264,14 +336,13 @@ export function createTouchControls(
       callbacks.onBreakEnd();
       isBreaking = false;
     } else if (!look.moved && elapsed < TAP_MAX_TIME) {
-      // Quick tap → place block
       callbacks.onPlace();
     }
     look.active = false;
     look.id = -1;
   };
 
-  // Touch listeners
+  // Touch listeners (joystick + look)
   const joyTouchStart = (e: TouchEvent) => {
     const t = e.changedTouches[0];
     joyStart(t.clientX, t.clientY, t.identifier);
@@ -361,30 +432,60 @@ export function createTouchControls(
   window.addEventListener("mousemove", lookMouseMove);
   window.addEventListener("mouseup", lookMouseUp);
 
-  // ---- JUMP / SPRINT / CRAFT / CHAT buttons ----
+  // ---- JUMP / SPRINT / SNEAK / CRAFT / CHAT buttons ----
   const jumpBtn = ui.querySelector<HTMLElement>('.mc-btn[data-act="jump"]')!;
   const sprintBtn = ui.querySelector<HTMLElement>('.mc-btn[data-act="sprint"]')!;
-  const craftBtn = ui.querySelector<HTMLElement>('.mc-btn[data-act="craft"]')!;
+  const sneakBtn = ui.querySelector<HTMLElement>('.mc-btn[data-act="sneak"]')!;
+  const craftBtn = hotbarEl.querySelector<HTMLElement>('button[data-act="craft"]')!;
   const chatBtn = ui.querySelector<HTMLElement>('.mc-btn[data-act="chat"]')!;
 
+  // Helper: visual press-down feedback — scale the button slightly while
+  // pressed and add a brighter background. Returns a restore function.
+  const pressFx = (el: HTMLElement, pressedBg: string) => {
+    const orig = el.style.background;
+    const origTrans = el.style.transform;
+    el.style.background = pressedBg;
+    el.style.transform = "translateY(1px) scale(0.97)";
+    return () => {
+      el.style.background = orig;
+      el.style.transform = origTrans;
+    };
+  };
+
   const bindButton = (el: HTMLElement, onDown: () => void, onUp?: () => void) => {
-    el.addEventListener("touchstart", (e) => { onDown(); e.preventDefault(); }, { passive: false });
-    el.addEventListener("touchend", (e) => { onUp?.(); e.preventDefault(); }, { passive: false });
-    el.addEventListener("touchcancel", (e) => { onUp?.(); e.preventDefault(); }, { passive: false });
-    el.addEventListener("mousedown", (e) => { onDown(); e.preventDefault(); });
+    let restore: (() => void) | null = null;
+    el.addEventListener("touchstart", (e) => {
+      restore = pressFx(el, GLASS_BG_ACTIVE);
+      onDown();
+      e.preventDefault();
+    }, { passive: false });
+    el.addEventListener("touchend", (e) => {
+      restore?.();
+      onUp?.();
+      e.preventDefault();
+    }, { passive: false });
+    el.addEventListener("touchcancel", (e) => {
+      restore?.();
+      onUp?.();
+      e.preventDefault();
+    }, { passive: false });
+    el.addEventListener("mousedown", (e) => {
+      restore = pressFx(el, GLASS_BG_ACTIVE);
+      onDown();
+      e.preventDefault();
+    });
     if (onUp) {
-      el.addEventListener("mouseup", (e) => { onUp(); e.preventDefault(); });
-      el.addEventListener("mouseleave", () => onUp());
+      el.addEventListener("mouseup", (e) => { restore?.(); onUp(); e.preventDefault(); });
+      el.addEventListener("mouseleave", () => { restore?.(); onUp(); });
     }
   };
 
-  // JUMP button: short press = jump (hold for continuous), long press = creative fly toggle
+  // JUMP: short press = jump (hold continuous), long press = creative fly toggle
   let jumpLongPressTimer: number | null = null;
   const JUMP_LONG_PRESS_TIME = 500;
   const startJump = () => {
     input.jump = true;
     callbacks.onJumpStart?.();
-    // Start long-press timer for creative fly
     clearJumpLongPress();
     jumpLongPressTimer = window.setTimeout(() => {
       callbacks.onJumpLongPress?.();
@@ -408,19 +509,45 @@ export function createTouchControls(
   bindButton(sprintBtn, () => {
     sprinting = !sprinting;
     input.sprint = sprinting;
-    sprintBtn.style.background = sprinting ? "rgba(255,200,60,0.9)" : "rgba(255,200,60,0.55)";
+    // Active state: brighter background + glow + green status dot.
+    if (sprinting) {
+      sprintBtn.style.background = "rgba(255, 200, 60, 0.9)";
+      sprintBtn.style.boxShadow = `0 0 16px rgba(255, 200, 60, 0.7), ${GLASS_SHADOW}`;
+      sprintBtn.style.borderColor = "rgba(255, 240, 180, 0.95)";
+      sprintBtn.style.color = "#fffbe6";
+    } else {
+      sprintBtn.style.background = "rgba(255, 180, 60, 0.45)";
+      sprintBtn.style.boxShadow = GLASS_SHADOW;
+      sprintBtn.style.borderColor = "rgba(255, 230, 180, 0.45)";
+      sprintBtn.style.color = "white";
+    }
     callbacks.onToggleSprint?.(sprinting);
+  });
+
+  // SNEAK: sticky toggle button. Tap once to start sneaking, tap again
+  // to stop. Visual feedback: brighter background + glow while active.
+  let sneaking = false;
+  bindButton(sneakBtn, () => {
+    sneaking = !sneaking;
+    input.sneak = sneaking;
+    if (sneaking) {
+      sneakBtn.style.background = "rgba(160, 160, 200, 0.85)";
+      sneakBtn.style.boxShadow = `0 0 12px rgba(160, 160, 200, 0.5), ${GLASS_SHADOW}`;
+      sneakBtn.style.borderColor = "rgba(220, 220, 255, 0.9)";
+    } else {
+      sneakBtn.style.background = "rgba(120, 120, 140, 0.45)";
+      sneakBtn.style.boxShadow = GLASS_SHADOW;
+      sneakBtn.style.borderColor = "rgba(200, 200, 220, 0.45)";
+    }
   });
 
   bindButton(craftBtn, () => callbacks.onCraft?.());
   bindButton(chatBtn, () => callbacks.onChat?.());
 
   // ---- Hotbar slot selection ----
-  // Hotbar: tap to select, long-press to eat (if food is selected)
   let slotLongPressTimer: number | null = null;
   const SLOT_LONG_PRESS_TIME = 500;
-
-  const startSlotLongPress = (slot: number) => {
+  const startSlotLongPress = (_slot: number) => {
     clearSlotLongPress();
     slotLongPressTimer = window.setTimeout(() => {
       callbacks.onEat?.();
@@ -442,11 +569,10 @@ export function createTouchControls(
     if (Number.isNaN(slot)) return;
     slotEls.forEach((el, i) => {
       el.style.border = i === slot
-        ? "2px solid white"
-        : "2px solid rgba(255,255,255,0.25)";
+        ? "2px solid rgba(180,210,255,0.95)"
+        : "1.5px solid rgba(255,255,255,0.18)";
     });
     callbacks.onSlotChange(slot);
-    // Start long-press timer for eating
     startSlotLongPress(slot);
     e.preventDefault();
   };
@@ -459,9 +585,12 @@ export function createTouchControls(
   hotbarEl.addEventListener("mousedown", onSlotTap);
   window.addEventListener("mouseup", onSlotRelease);
 
-  // Public API for setting hotbar icons
+  // Public API for setting hotbar icons + counts
   (container as unknown as { __mcSetHotbarIcon?: (slot: number, dataUrl: string) => void }).__mcSetHotbarIcon = (slot: number, dataUrl: string) => {
     (ui as unknown as { setHotbarIcon: (slot: number, dataUrl: string) => void }).setHotbarIcon(slot, dataUrl);
+  };
+  (container as unknown as { __mcSetHotbarCount?: (slot: number, count: number) => void }).__mcSetHotbarCount = (slot: number, count: number) => {
+    (ui as unknown as { setHotbarCount: (slot: number, count: number) => void }).setHotbarCount(slot, count);
   };
 
   return {
@@ -489,6 +618,7 @@ export function createTouchControls(
       hotbarEl.removeEventListener("mousedown", onSlotTap);
       window.removeEventListener("mouseup", onSlotRelease);
       delete (container as unknown as { __mcSetHotbarIcon?: unknown }).__mcSetHotbarIcon;
+      delete (container as unknown as { __mcSetHotbarCount?: unknown }).__mcSetHotbarCount;
       container.removeChild(ui);
     },
   };

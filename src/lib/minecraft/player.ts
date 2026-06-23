@@ -5,19 +5,25 @@
 import * as THREE from "three";
 import { World } from "./world";
 import { CHUNK_HEIGHT } from "./biomes";
+import { BlockType } from "./blocks";
 
 const PLAYER_HEIGHT = 1.8;
 const PLAYER_EYE = 1.62;
 const PLAYER_HALF_WIDTH = 0.3; // half-width of the AABB on X and Z
 
 const GRAVITY = -28;
+const WATER_GRAVITY = -4; // reduced gravity while submerged
+const WATER_BUOYANCY = 6; // upward impulse when holding jump underwater
 const JUMP_VELOCITY = 9.2;
 const WALK_SPEED = 4.6;
 const SPRINT_SPEED = 7.2;
+const SNEAK_SPEED = 1.8; // slow careful movement while sneaking
+const WATER_SPEED = 2.5; // slower horizontal movement while submerged
 const ACCEL_GROUND = 14;
 const ACCEL_AIR = 3.5;
 const FRICTION = 12;
 const TERMINAL_VELOCITY = -55;
+const WATER_TERMINAL_VELOCITY = -3;
 const MAX_REACH = 5; // block break/place reach in blocks
 const AUTO_JUMP_HEIGHT = 1; // max step height for auto-jump (in blocks)
 
@@ -28,6 +34,7 @@ export interface InputState {
   right: boolean;
   jump: boolean;
   sprint: boolean;
+  sneak: boolean; // Shift key — slower movement, prevents edge-falling
 }
 
 export interface RaycastHit {
@@ -45,6 +52,9 @@ export class Player {
   yaw = 0;
   pitch = 0;
   onGround = false;
+  // True while the player's eye is inside a water block. Set by the
+  // engine each frame before update(); drives water physics + UI overlay.
+  submerged = false;
   camera: THREE.PerspectiveCamera;
   // Multiplier applied to walk/sprint speed. The engine sets this to 0.6
   // when the player is hungry (food < 6) and 1 otherwise.
@@ -78,7 +88,13 @@ export class Player {
     this.forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
 
-    const speed = (input.sprint ? SPRINT_SPEED : WALK_SPEED) * this.speedMultiplier;
+    // While submerged, horizontal speed is heavily reduced and sprinting
+    // is disabled (water resistance). Sneaking also slows the player on
+    // land. Priority: submerged > sneak > sprint > walk.
+    const baseSpeed = this.submerged
+      ? WATER_SPEED
+      : (input.sneak ? SNEAK_SPEED : (input.sprint ? SPRINT_SPEED : WALK_SPEED));
+    const speed = baseSpeed * this.speedMultiplier;
     this.move.set(0, 0, 0);
     if (input.forward) this.move.add(this.forward);
     if (input.back) this.move.sub(this.forward);
@@ -89,15 +105,15 @@ export class Player {
       this.move.normalize().multiplyScalar(speed);
     }
 
-    // Accelerate toward desired velocity (less control in air)
+    // Accelerate toward desired velocity (less control in air; same in water)
     const accel = this.onGround ? ACCEL_GROUND : ACCEL_AIR;
     const dvx = this.move.x - this.velocity.x;
     const dvz = this.move.z - this.velocity.z;
     this.velocity.x += Math.sign(dvx) * Math.min(Math.abs(dvx), accel * dt);
     this.velocity.z += Math.sign(dvz) * Math.min(Math.abs(dvz), accel * dt);
 
-    // Friction when no input on ground
-    if (this.move.lengthSq() === 0 && this.onGround) {
+    // Friction when no input on ground (or in water — water drag)
+    if (this.move.lengthSq() === 0 && (this.onGround || this.submerged)) {
       const f = FRICTION * dt;
       if (Math.abs(this.velocity.x) < f) this.velocity.x = 0;
       else this.velocity.x -= Math.sign(this.velocity.x) * f;
@@ -105,15 +121,23 @@ export class Player {
       else this.velocity.z -= Math.sign(this.velocity.z) * f;
     }
 
-    // Jump (manual)
-    if (input.jump && this.onGround) {
-      this.velocity.y = JUMP_VELOCITY;
+    if (this.submerged) {
+      // Water physics: jump = swim up (buoyancy); reduced gravity; soft terminal.
+      if (input.jump) this.velocity.y += WATER_BUOYANCY * dt;
+      this.velocity.y += WATER_GRAVITY * dt;
+      if (this.velocity.y < WATER_TERMINAL_VELOCITY) this.velocity.y = WATER_TERMINAL_VELOCITY;
+      if (this.velocity.y > 4) this.velocity.y = 4; // cap swim-up speed
+      // Skip the auto-jump logic below — water has no auto-jump.
       this.onGround = false;
+    } else {
+      // Normal physics: jump (manual) + gravity.
+      if (input.jump && this.onGround) {
+        this.velocity.y = JUMP_VELOCITY;
+        this.onGround = false;
+      }
+      this.velocity.y += GRAVITY * dt;
+      if (this.velocity.y < TERMINAL_VELOCITY) this.velocity.y = TERMINAL_VELOCITY;
     }
-
-    // Gravity
-    this.velocity.y += GRAVITY * dt;
-    if (this.velocity.y < TERMINAL_VELOCITY) this.velocity.y = TERMINAL_VELOCITY;
 
     // Snapshot horizontal velocity BEFORE collision so we can detect
     // whether the player was blocked by a 1-block step (auto-jump).
@@ -125,14 +149,34 @@ export class Player {
     // Move with collision (axis-separated)
     this.moveAxis(world, this.velocity.x * dt, 0, 0);
     this.moveAxis(world, 0, 0, this.velocity.z * dt);
+
+    // SNEAK edge-fall prevention: while sneaking on the ground, if the
+    // player's center is no longer over a solid block (i.e. they would
+    // walk off an edge), cancel horizontal movement to prevent falling.
+    // This is the classic Minecraft sneak behavior.
+    if (input.sneak && this.onGround && !this.submerged) {
+      const footX = Math.floor(this.position.x);
+      const footY = Math.floor(this.position.y - 0.1);
+      const footZ = Math.floor(this.position.z);
+      if (!world.isSolidAt(footX, footY, footZ)) {
+        // Revert to pre-move horizontal position
+        this.position.x = preX;
+        this.position.z = preZ;
+        this.velocity.x = 0;
+        this.velocity.z = 0;
+      }
+    }
+
     this.moveAxis(world, 0, this.velocity.y * dt, 0);
 
     // AUTO-JUMP: if the player was moving horizontally, is on the
     // ground, got blocked (didn't move the full requested distance),
     // and the obstacle is exactly 1 block tall with room above, give a
     // small upward impulse so they automatically step up. This matches
-    // Minecraft's auto-jump behavior.
+    // Minecraft's auto-jump behavior. Skipped while submerged (water
+    // already lets the player swim up with jump).
     if (
+      !this.submerged &&
       this.onGround &&
       (Math.abs(preVX) > 0.01 || Math.abs(preVZ) > 0.01) &&
       !input.jump
@@ -278,7 +322,12 @@ export class Player {
     let t = 0;
     while (t <= MAX_REACH) {
       const id = world.getBlock(x, y, z);
-      if (id !== 0 && id !== 7) { // air and water are pass-through for raycast
+      // Air, water, and portal blocks (both types) are pass-through for raycast.
+      // Flowers and tall grass ARE targetable (so the player can break
+      // them), despite being non-solid for movement.
+      const isPassable = id === BlockType.AIR || id === BlockType.WATER
+        || id === BlockType.PORTAL || id === BlockType.PORTAL_SKY;
+      if (!isPassable) {
         return { x, y, z, nx, ny, nz };
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {
@@ -301,5 +350,3 @@ export class Player {
     return null;
   }
 }
-
-export { PLAYER_HEIGHT, PLAYER_HALF_WIDTH };

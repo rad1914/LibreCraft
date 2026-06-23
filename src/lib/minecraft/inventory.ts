@@ -2,6 +2,12 @@
 // The first 9 slots ARE the hotbar — there's no separate hotbar array.
 // The player starts empty and collects everything by breaking blocks.
 // Crafting draws from and deposits into the same list.
+//
+// In addition to the main slots, there's a dedicated "offhand" slot
+// (slot -1) that only accepts TORCH or SWORD. It appears in the hotbar
+// UI when the inventory is open. While a torch is in the offhand slot,
+// the player gets dynamic walking light; while a sword is there, the
+// player deals bonus attack damage.
 
 import { BlockType } from "./blocks";
 
@@ -10,14 +16,21 @@ export interface InvSlot {
   count: number;
 }
 
-const HOTBAR_SIZE = 9;
+export const HOTBAR_SIZE = 9;
 const MAIN_SIZE = 18; // main inventory rows
 const TOTAL_SIZE = HOTBAR_SIZE + MAIN_SIZE; // 27 slots total
+
+// The offhand slot only accepts these item types.
+export const OFFHAND_ALLOWED = new Set<number>([BlockType.TORCH, BlockType.SWORD]);
 
 export class Inventory {
   // Flat array; indices 0..8 are hotbar, 9..26 are main inventory.
   slots: InvSlot[] = [];
   selected = 0; // selected hotbar slot index (0..8)
+  // Offhand slot — a dedicated slot (separate from the main grid) that
+  // only holds a torch or sword. Used for dynamic torch lighting and
+  // sword damage bonus.
+  offhand: InvSlot = { id: BlockType.AIR, count: 0 };
 
   constructor() {
     for (let i = 0; i < TOTAL_SIZE; i++) this.slots.push({ id: BlockType.AIR, count: 0 });
@@ -102,13 +115,6 @@ export class Inventory {
     return id;
   }
 
-  // Move a block type into the selected hotbar slot (from main inventory
-  // or by swapping). Used by the inventory UI.
-  setSelectedBlock(id: number) {
-    if (this.selected < 0 || this.selected >= HOTBAR_SIZE) return;
-    this.slots[this.selected] = { id, count: id === BlockType.AIR ? 0 : 1 };
-  }
-
   selectSlot(i: number) {
     if (i >= 0 && i < HOTBAR_SIZE) this.selected = i;
   }
@@ -116,5 +122,55 @@ export class Inventory {
   // Flat snapshot for React rendering.
   list(): InvSlot[] {
     return this.slots.map((s) => ({ ...s }));
+  }
+
+  // --- Offhand slot (slot -1) ---
+  // Returns the item id in the offhand slot, or AIR if empty.
+  getOffhand(): number { return this.offhand.id; }
+
+  // Try to move an item from main slot `index` to the offhand slot.
+  // Only succeeds if the item is TORCH or SWORD. Returns true on success.
+  moveToOffhand(index: number): boolean {
+    if (index < 0 || index >= this.slots.length) return false;
+    const s = this.slots[index];
+    if (s.id === BlockType.AIR || s.count <= 0) return false;
+    if (!OFFHAND_ALLOWED.has(s.id)) return false;
+    // If offhand is empty, move the whole stack. If offhand has the same
+    // id, merge (up to 64). Otherwise, swap.
+    if (this.offhand.id === BlockType.AIR) {
+      this.offhand = { id: s.id, count: s.count };
+      s.id = BlockType.AIR;
+      s.count = 0;
+      return true;
+    }
+    if (this.offhand.id === s.id && this.offhand.count < 64) {
+      const space = 64 - this.offhand.count;
+      const move = Math.min(space, s.count);
+      this.offhand.count += move;
+      s.count -= move;
+      if (s.count <= 0) { s.id = BlockType.AIR; s.count = 0; }
+      return true;
+    }
+    // Swap
+    const tmp = this.offhand;
+    this.offhand = { id: s.id, count: s.count };
+    s.id = tmp.id;
+    s.count = tmp.count;
+    return true;
+  }
+
+  // Move the offhand item back to the first empty main slot. Returns
+  // true on success.
+  moveOffhandToMain(): boolean {
+    if (this.offhand.id === BlockType.AIR || this.offhand.count <= 0) return false;
+    // Try to add to main inventory.
+    const leftover = this.add(this.offhand.id, this.offhand.count);
+    if (leftover === 0) {
+      this.offhand = { id: BlockType.AIR, count: 0 };
+      return true;
+    }
+    // Partial — keep what didn't fit.
+    this.offhand.count = leftover;
+    return true;
   }
 }

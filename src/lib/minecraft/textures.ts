@@ -8,7 +8,8 @@
 // We bump tile size to 16 with no padding to keep UV math simple.
 
 import * as THREE from "three";
-import { BLOCKS, BlockType } from "./blocks";
+import { BlockType } from "./blocks";
+import { mulberry32, hashStr } from "./rng";
 
 export const TILE = 16; // pixels per tile
 export const TILES_PER_ROW = 3; // top, side, bottom
@@ -17,7 +18,7 @@ interface TextureSpec {
   base: string; // base fill color (hex)
   noise: string; // noise speckle color (hex)
   noiseAmount: number; // 0..1 fraction of pixels to speckle
-  pattern?: "grass_top" | "wood_side" | "wood_top" | "leaves" | "brick" | "cobble" | "stone" | "sand" | "water" | "snow" | "glass" | "planks" | "dirt" | "bedrock";
+  pattern?: "grass_top" | "grass_side" | "wood_side" | "wood_top" | "leaves" | "brick" | "cobble" | "stone" | "sand" | "water" | "snow" | "glass" | "planks" | "dirt" | "bedrock" | "wool" | "flower_top" | "flower_side" | "tall_grass" | "mossy_cobble" | "coal_ore" | "iron_ore" | "diamond_ore" | "ruby_ore" | "coal" | "grave_top" | "grave_side" | "portal" | "portal_sky" | "ruby" | "iron_pickaxe" | "diamond_pickaxe" | "hay" | "door_top" | "door_side";
 }
 
 // Per-block, per-face texture specs. Patterns draw extra details on top
@@ -103,6 +104,71 @@ const SPECS: Record<number, [TextureSpec, TextureSpec, TextureSpec]> = {
     { base: "#6b4421", noise: "#553619", noiseAmount: 0.2, pattern: "planks" },
     { base: "#6b4421", noise: "#553619", noiseAmount: 0.2, pattern: "planks" },
   ],
+  [BlockType.WOOL]: [
+    { base: "#eeeeee", noise: "#dddddd", noiseAmount: 0.45, pattern: "wool" },
+    { base: "#dddddd", noise: "#cccccc", noiseAmount: 0.45, pattern: "wool" },
+    { base: "#cccccc", noise: "#bbbbbb", noiseAmount: 0.45, pattern: "wool" },
+  ],
+  [BlockType.FLOWER]: [
+    { base: "#2ecc71", noise: "#25a358", noiseAmount: 0.2, pattern: "flower_top" },
+    { base: "#cc4444", noise: "#993333", noiseAmount: 0.2, pattern: "flower_side" },
+    { base: "#2ecc71", noise: "#25a358", noiseAmount: 0.2, pattern: "flower_top" },
+  ],
+  [BlockType.TALL_GRASS]: [
+    { base: "#5b9245", noise: "#4a7d3a", noiseAmount: 0.4, pattern: "tall_grass" },
+    { base: "#5b9245", noise: "#4a7d3a", noiseAmount: 0.4, pattern: "tall_grass" },
+    { base: "#5b9245", noise: "#4a7d3a", noiseAmount: 0.4, pattern: "tall_grass" },
+  ],
+  [BlockType.MOSSY_COBBLE]: [
+    { base: "#6a7a55", noise: "#5a6a4a", noiseAmount: 0.5, pattern: "mossy_cobble" },
+    { base: "#5a6a4a", noise: "#4a5a3a", noiseAmount: 0.5, pattern: "mossy_cobble" },
+    { base: "#4a5a3a", noise: "#3a4a2a", noiseAmount: 0.5, pattern: "mossy_cobble" },
+  ],
+  [BlockType.COAL_ORE]: [
+    { base: "#444444", noise: "#3a3a3a", noiseAmount: 0.4, pattern: "coal_ore" },
+    { base: "#3a3a3a", noise: "#2e2e2e", noiseAmount: 0.4, pattern: "coal_ore" },
+    { base: "#2e2e2e", noise: "#222222", noiseAmount: 0.4, pattern: "coal_ore" },
+  ],
+  [BlockType.IRON_ORE]: [
+    { base: "#a09080", noise: "#908074", noiseAmount: 0.4, pattern: "iron_ore" },
+    { base: "#908074", noise: "#807064", noiseAmount: 0.4, pattern: "iron_ore" },
+    { base: "#807064", noise: "#706058", noiseAmount: 0.4, pattern: "iron_ore" },
+  ],
+  [BlockType.DIAMOND_ORE]: [
+    { base: "#3a5a6a", noise: "#2a4a5a", noiseAmount: 0.35, pattern: "diamond_ore" },
+    { base: "#2a4a5a", noise: "#1a3a4a", noiseAmount: 0.35, pattern: "diamond_ore" },
+    { base: "#1a3a4a", noise: "#0a2a3a", noiseAmount: 0.35, pattern: "diamond_ore" },
+  ],
+  [BlockType.PORTAL]: [
+    { base: "#2a8a9a", noise: "#1a7a8a", noiseAmount: 0.5, pattern: "portal_sky" },
+    { base: "#1a7a8a", noise: "#0a6a7a", noiseAmount: 0.5, pattern: "portal_sky" },
+    { base: "#0a6a7a", noise: "#005a6a", noiseAmount: 0.5, pattern: "portal_sky" },
+  ],
+  [BlockType.PORTAL_SKY]: [
+    { base: "#2a8a9a", noise: "#1a7a8a", noiseAmount: 0.5, pattern: "portal_sky" },
+    { base: "#1a7a8a", noise: "#0a6a7a", noiseAmount: 0.5, pattern: "portal_sky" },
+    { base: "#0a6a7a", noise: "#005a6a", noiseAmount: 0.5, pattern: "portal_sky" },
+  ],
+  [BlockType.RUBY_ORE]: [
+    { base: "#5a1a1a", noise: "#4a0a0a", noiseAmount: 0.35, pattern: "ruby_ore" },
+    { base: "#4a0a0a", noise: "#3a0000", noiseAmount: 0.35, pattern: "ruby_ore" },
+    { base: "#3a0000", noise: "#2a0000", noiseAmount: 0.35, pattern: "ruby_ore" },
+  ],
+  [BlockType.HAY]: [
+    { base: "#c9a04a", noise: "#a88838", noiseAmount: 0.4, pattern: "hay" },
+    { base: "#b08a3a", noise: "#8a6a28", noiseAmount: 0.4, pattern: "hay" },
+    { base: "#8a6a28", noise: "#6a5018", noiseAmount: 0.4, pattern: "hay" },
+  ],
+  [BlockType.DOOR]: [
+    { base: "#a67a3f", noise: "#8a6630", noiseAmount: 0.25, pattern: "door_top" },
+    { base: "#a67a3f", noise: "#8a6630", noiseAmount: 0.25, pattern: "door_side" },
+    { base: "#6b4421", noise: "#553619", noiseAmount: 0.25, pattern: "door_side" },
+  ],
+  [BlockType.GRAVE]: [
+    { base: "#4a4a4a", noise: "#3a3a3a", noiseAmount: 0.35, pattern: "grave_top" },
+    { base: "#3a3a3a", noise: "#2a2a2a", noiseAmount: 0.35, pattern: "grave_side" },
+    { base: "#2a2a2a", noise: "#1a1a1a", noiseAmount: 0.35, pattern: "grave_side" },
+  ],
   [BlockType.FOOD]: [
     { base: "#cc4444", noise: "#aa3333", noiseAmount: 0.3, pattern: "food" },
     { base: "#cc4444", noise: "#aa3333", noiseAmount: 0.3, pattern: "food" },
@@ -128,13 +194,33 @@ const SPECS: Record<number, [TextureSpec, TextureSpec, TextureSpec]> = {
     { base: "#c0c0c0", noise: "#999999", noiseAmount: 0.2, pattern: "shovel" },
     { base: "#c0c0c0", noise: "#999999", noiseAmount: 0.2, pattern: "shovel" },
   ],
+  [BlockType.COAL]: [
+    { base: "#1a1a1a", noise: "#0a0a0a", noiseAmount: 0.4, pattern: "coal" },
+    { base: "#1a1a1a", noise: "#0a0a0a", noiseAmount: 0.4, pattern: "coal" },
+    { base: "#1a1a1a", noise: "#0a0a0a", noiseAmount: 0.4, pattern: "coal" },
+  ],
+  [BlockType.RUBY]: [
+    { base: "#e02020", noise: "#a01010", noiseAmount: 0.3, pattern: "ruby" },
+    { base: "#e02020", noise: "#a01010", noiseAmount: 0.3, pattern: "ruby" },
+    { base: "#e02020", noise: "#a01010", noiseAmount: 0.3, pattern: "ruby" },
+  ],
+  [BlockType.IRON_PICKAXE]: [
+    { base: "#d0d0d0", noise: "#999999", noiseAmount: 0.2, pattern: "iron_pickaxe" },
+    { base: "#d0d0d0", noise: "#999999", noiseAmount: 0.2, pattern: "iron_pickaxe" },
+    { base: "#d0d0d0", noise: "#999999", noiseAmount: 0.2, pattern: "iron_pickaxe" },
+  ],
+  [BlockType.DIAMOND_PICKAXE]: [
+    { base: "#60e0e0", noise: "#40c0c0", noiseAmount: 0.2, pattern: "diamond_pickaxe" },
+    { base: "#60e0e0", noise: "#40c0c0", noiseAmount: 0.2, pattern: "diamond_pickaxe" },
+    { base: "#60e0e0", noise: "#40c0c0", noiseAmount: 0.2, pattern: "diamond_pickaxe" },
+  ],
 };
 
-let cachedAtlas: { texture: THREE.Texture; tileUV: number; rows: number; canvas: HTMLCanvasElement } | null = null;
+let cachedAtlas: { texture: THREE.Texture; rows: number; canvas: HTMLCanvasElement } | null = null;
 
 // Generate (or return cached) the texture atlas. Returns a THREE.Texture
 // configured with NearestFilter for pixel-perfect rendering.
-export function getTextureAtlas(): { texture: THREE.Texture; tileUV: number; rows: number; canvas: HTMLCanvasElement } {
+export function getTextureAtlas(): { texture: THREE.Texture; rows: number; canvas: HTMLCanvasElement } {
   if (cachedAtlas) return cachedAtlas;
 
   const blockIds = Object.keys(SPECS).map(Number);
@@ -170,13 +256,8 @@ export function getTextureAtlas(): { texture: THREE.Texture; tileUV: number; row
 
   // Attach rowById to the texture for the mesher
   (texture as unknown as { _rowById: Map<number, number> })._rowById = rowById;
-  // Each tile spans 1/TILES_PER_ROW horizontally, 1/rows vertically.
-  // We inset slightly to avoid bleeding at tile edges.
-  const tileUV = 1 / TILES_PER_ROW;
-  const tileV = 1 / rows;
 
-  cachedAtlas = { texture, tileUV, rows, canvas };
-  (cachedAtlas as unknown as { tileV: number }).tileV = tileV;
+  cachedAtlas = { texture, rows, canvas };
   return cachedAtlas;
 }
 
@@ -208,6 +289,19 @@ export function getBlockIconDataURL(blockId: number, faceKind: "top" | "side" | 
 }
 
 function drawTile(ctx: CanvasRenderingContext2D, x: number, y: number, spec: TextureSpec) {
+  // Sprite blocks (flowers, tall grass, torches) start with a transparent
+  // tile — only the plant/torch pixels are drawn, so the crossed-quad
+  // geometry shows the shape instead of a solid colored cube.
+  if (spec.pattern === "flower_top" || spec.pattern === "flower_side"
+      || spec.pattern === "tall_grass"
+      || spec.pattern === "torch_top" || spec.pattern === "torch_side") {
+    ctx.clearRect(x, y, TILE, TILE);
+    // Skip the base+noise fill; jump straight to the pattern overlay.
+    const rng = mulberry32(hashStr(spec.base + spec.noise + spec.pattern));
+    drawPattern(ctx, x, y, spec, rng);
+    return;
+  }
+
   // Base fill
   ctx.fillStyle = spec.base;
   ctx.fillRect(x, y, TILE, TILE);
@@ -247,6 +341,12 @@ function drawTile(ctx: CanvasRenderingContext2D, x: number, y: number, spec: Tex
   }
 
   // Pattern overlay
+  drawPattern(ctx, x, y, spec, rng);
+}
+
+// Draw the pattern overlay for a tile. Extracted so sprite blocks can
+// call it directly (skipping the base+noise fill).
+function drawPattern(ctx: CanvasRenderingContext2D, x: number, y: number, spec: TextureSpec, rng: () => number) {
   switch (spec.pattern) {
     case "grass_top":
       drawGrassTop(ctx, x, y, rng);
@@ -326,6 +426,67 @@ function drawTile(ctx: CanvasRenderingContext2D, x: number, y: number, spec: Tex
     case "bedrock":
       drawSpots(ctx, x, y, rng, "#000000", 8);
       drawSpots(ctx, x, y, rng, "#4a4a4a", 4);
+      break;
+    case "wool":
+      drawWool(ctx, x, y, rng);
+      break;
+    case "flower_top":
+      drawFlowerTop(ctx, x, y);
+      break;
+    case "flower_side":
+      drawFlowerSide(ctx, x, y);
+      break;
+    case "tall_grass":
+      drawTallGrass(ctx, x, y, rng);
+      break;
+    case "mossy_cobble":
+      drawMossyCobble(ctx, x, y, rng);
+      break;
+    case "coal_ore":
+      drawOre(ctx, x, y, rng, "#0a0a0a");
+      break;
+    case "iron_ore":
+      drawOre(ctx, x, y, rng, "#c8a878");
+      break;
+    case "diamond_ore":
+      drawOre(ctx, x, y, rng, "#4ee8e8");
+      break;
+    case "ruby_ore":
+      drawOre(ctx, x, y, rng, "#ff2020");
+      break;
+    case "coal":
+      drawSpots(ctx, x, y, rng, "#000000", 6);
+      drawSpots(ctx, x, y, rng, "#3a3a3a", 4);
+      break;
+    case "grave_top":
+      drawGraveTop(ctx, x, y);
+      break;
+    case "grave_side":
+      drawGraveSide(ctx, x, y);
+      break;
+    case "portal":
+      drawPortal(ctx, x, y, rng);
+      break;
+    case "portal_sky":
+      drawPortal(ctx, x, y, rng, true);
+      break;
+    case "ruby":
+      drawRuby(ctx, x, y, rng);
+      break;
+    case "iron_pickaxe":
+      drawPickaxeTiered(ctx, x, y, "#d0d0d0", "#999999");
+      break;
+    case "diamond_pickaxe":
+      drawPickaxeTiered(ctx, x, y, "#60e0e0", "#40c0c0");
+      break;
+    case "hay":
+      drawHay(ctx, x, y);
+      break;
+    case "door_top":
+      drawDoorTop(ctx, x, y);
+      break;
+    case "door_side":
+      drawDoorSide(ctx, x, y);
       break;
   }
 }
@@ -572,6 +733,250 @@ function drawBedSide(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.fillRect(x + 1, y + 7, 14, 1);
 }
 
+// Wool: soft woven texture with subtle crosshatch strands.
+function drawWool(ctx: CanvasRenderingContext2D, x: number, y: number, rng: () => number) {
+  // Faint horizontal strands every 2-3 px
+  ctx.fillStyle = "#bbbbbb";
+  for (let py = 1; py < TILE; py += 3) {
+    for (let px = 0; px < TILE; px++) {
+      if (rng() < 0.7) ctx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+  // Faint vertical strands
+  ctx.fillStyle = "#cccccc";
+  for (let px = 2; px < TILE; px += 4) {
+    for (let py = 0; py < TILE; py++) {
+      if (rng() < 0.4) ctx.fillRect(x + px, y + py, 1, 1);
+    }
+  }
+}
+
+// Flower top: a small green cross (leaves) — flower is rendered as a
+// cross-shape sprite, not a full block, so the top is mostly transparent.
+function drawFlowerTop(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  ctx.fillStyle = "#2ecc71";
+  // Center 4x4 leaf cluster
+  ctx.fillRect(x + 6, y + 6, 4, 4);
+  ctx.fillRect(x + 5, y + 7, 1, 2);
+  ctx.fillRect(x + 10, y + 7, 1, 2);
+}
+
+// Flower side: a red petals blob on a thin green stem — appears as an
+// X-shape sprite when viewed from the side.
+function drawFlowerSide(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  // Stem (center column, lower half)
+  ctx.fillStyle = "#2ecc71";
+  for (let py = 8; py < TILE; py++) ctx.fillRect(x + 7, y + py, 2, 1);
+  // Leaves on the stem
+  ctx.fillRect(x + 5, y + 10, 2, 1);
+  ctx.fillRect(x + 9, y + 11, 2, 1);
+  // Petals (red, top portion — rounded)
+  ctx.fillStyle = "#cc4444";
+  ctx.fillRect(x + 5, y + 4, 6, 1);
+  ctx.fillRect(x + 4, y + 5, 8, 1);
+  ctx.fillRect(x + 4, y + 6, 8, 1);
+  ctx.fillRect(x + 5, y + 7, 6, 1);
+  // Yellow center
+  ctx.fillStyle = "#ffdd33";
+  ctx.fillRect(x + 7, y + 5, 2, 2);
+}
+
+// Tall grass: vertical blades of varying height — sprite-like, mostly
+// transparent except for the blades themselves.
+function drawTallGrass(ctx: CanvasRenderingContext2D, x: number, y: number, rng: () => number) {
+  ctx.fillStyle = "#5b9245";
+  for (let blade = 0; blade < 5; blade++) {
+    const bx = 2 + Math.floor(rng() * 12);
+    const h = 6 + Math.floor(rng() * 8);
+    for (let py = 0; py < h; py++) {
+      ctx.fillRect(x + bx, y + TILE - 1 - py, 1, 1);
+    }
+  }
+  // Lighter highlights on a few blades
+  ctx.fillStyle = "#7cb858";
+  for (let i = 0; i < 4; i++) {
+    const bx = 3 + Math.floor(rng() * 10);
+    ctx.fillRect(x + bx, y + TILE - 4, 1, 2);
+  }
+}
+
+// Mossy cobble: regular cobble texture overlaid with green moss patches.
+function drawMossyCobble(ctx: CanvasRenderingContext2D, x: number, y: number, rng: () => number) {
+  // Base cobble cracks
+  ctx.fillStyle = "#3a3a3a";
+  for (let i = 0; i < 3; i++) {
+    const py = 2 + Math.floor(rng() * 12);
+    for (let px = 0; px < TILE; px++) ctx.fillRect(x + px, y + py, 1, 1);
+  }
+  for (let i = 0; i < 3; i++) {
+    const px = 2 + Math.floor(rng() * 12);
+    for (let py = 0; py < TILE; py++) ctx.fillRect(x + px, y + py, 1, 1);
+  }
+  // Moss patches (green, clustered in corners and along cracks)
+  ctx.fillStyle = "#4a7a3a";
+  // Top-left moss blob
+  ctx.fillRect(x + 1, y + 1, 4, 2);
+  ctx.fillRect(x + 2, y + 3, 3, 1);
+  // Bottom-right moss blob
+  ctx.fillRect(x + 11, y + 12, 4, 2);
+  ctx.fillRect(x + 12, y + 11, 3, 1);
+  // Random moss specks
+  for (let i = 0; i < 5; i++) {
+    ctx.fillRect(x + 1 + Math.floor(rng() * 14), y + 1 + Math.floor(rng() * 14), 1, 1);
+  }
+  // Lighter moss highlights
+  ctx.fillStyle = "#6a9a5a";
+  ctx.fillRect(x + 2, y + 1, 2, 1);
+  ctx.fillRect(x + 12, y + 13, 2, 1);
+}
+
+// Generic ore drawing: stone base with colored mineral blobs.
+function drawOre(ctx: CanvasRenderingContext2D, x: number, y: number, rng: () => number, mineralColor: string) {
+  // A few mineral blobs of varying size
+  ctx.fillStyle = mineralColor;
+  // Larger blob (3x3-ish)
+  ctx.fillRect(x + 4 + Math.floor(rng() * 2), y + 4 + Math.floor(rng() * 2), 2, 2);
+  ctx.fillRect(x + 4, y + 7, 1, 1);
+  // Smaller specks
+  for (let i = 0; i < 4; i++) {
+    ctx.fillRect(x + 2 + Math.floor(rng() * 12), y + 2 + Math.floor(rng() * 12), 1, 1);
+  }
+  // Tiny highlight on the main blob
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.fillRect(x + 5, y + 5, 1, 1);
+}
+
+// Grave top: a rounded headstone slab seen from above — darker stone
+// with a small cross carved into the center.
+function drawGraveTop(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  // Slightly darker frame to suggest a beveled edge
+  ctx.fillStyle = "#2a2a2a";
+  for (let i = 0; i < TILE; i++) {
+    ctx.fillRect(x + i, y + 0, 1, 1);
+    ctx.fillRect(x + i, y + TILE - 1, 1, 1);
+    ctx.fillRect(x + 0, y + i, 1, 1);
+    ctx.fillRect(x + TILE - 1, y + i, 1, 1);
+  }
+  // Small cross engraving in the center
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(x + 7, y + 5, 2, 6);
+  ctx.fillRect(x + 5, y + 7, 6, 2);
+}
+
+// Grave side: a tall headstone silhouette on a stone base — the iconic
+// rounded-top tombstone shape.
+function drawGraveSide(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  // Base ground line (darker)
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(x, y + TILE - 2, TILE, 2);
+  // Headstone body (lighter grey, rounded top)
+  ctx.fillStyle = "#5a5a5a";
+  // Main slab
+  ctx.fillRect(x + 3, y + 4, 10, 10);
+  // Rounded top (arch)
+  ctx.fillRect(x + 4, y + 3, 8, 1);
+  ctx.fillRect(x + 5, y + 2, 6, 1);
+  ctx.fillRect(x + 6, y + 1, 4, 1);
+  // Highlight on the left edge
+  ctx.fillStyle = "#6a6a6a";
+  ctx.fillRect(x + 3, y + 5, 1, 8);
+  // R.I.P. engraving (dark pixels)
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(x + 7, y + 6, 2, 1);
+  ctx.fillRect(x + 7, y + 8, 2, 1);
+  ctx.fillRect(x + 7, y + 10, 2, 1);
+  // Crack at the bottom (weathering)
+  ctx.fillStyle = "#2a2a2a";
+  ctx.fillRect(x + 6, y + 12, 1, 2);
+  ctx.fillRect(x + 9, y + 11, 1, 2);
+}
+
+// Portal: swirling vortex texture — concentric arcs with brighter
+// speckles to evoke a magical portal surface. Purple by default (overworld),
+// aqua when `sky` is true (sky dimension).
+function drawPortal(ctx: CanvasRenderingContext2D, x: number, y: number, rng: () => number, sky = false) {
+  const arcColor = sky ? "#3aaaba" : "#8a5aaa";
+  const centerColor = sky ? "#8aeaff" : "#c08aff";
+  const sparkle1 = sky ? "#b0f0ff" : "#e0b0ff";
+  const sparkle2 = sky ? "#40a0c0" : "#a060d0";
+  // Concentric arcs (darker to lighter, inward)
+  ctx.strokeStyle = arcColor;
+  ctx.lineWidth = 1;
+  for (let r = 7; r > 1; r--) {
+    ctx.beginPath();
+    ctx.arc(x + 8, y + 8, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Bright swirl center
+  ctx.fillStyle = centerColor;
+  ctx.fillRect(x + 7, y + 7, 2, 2);
+  // Sparkle speckles
+  for (let i = 0; i < 8; i++) {
+    const sx = x + 2 + Math.floor(rng() * 12);
+    const sy = y + 2 + Math.floor(rng() * 12);
+    ctx.fillStyle = rng() < 0.5 ? sparkle1 : sparkle2;
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+}
+
+// Ruby: a faceted red gem — diamond shape with bright highlight.
+function drawRuby(ctx: CanvasRenderingContext2D, x: number, y: number, rng: () => number) {
+  // Diamond/gem shape (top half narrower than bottom)
+  ctx.fillStyle = "#e02020";
+  // Top point
+  ctx.fillRect(x + 7, y + 3, 2, 1);
+  ctx.fillRect(x + 6, y + 4, 4, 1);
+  ctx.fillRect(x + 5, y + 5, 6, 1);
+  // Wide middle
+  ctx.fillRect(x + 4, y + 6, 8, 3);
+  // Bottom taper
+  ctx.fillRect(x + 5, y + 9, 6, 1);
+  ctx.fillRect(x + 6, y + 10, 4, 1);
+  ctx.fillRect(x + 7, y + 11, 2, 1);
+  // Bright highlight (upper-left facet)
+  ctx.fillStyle = "#ff6060";
+  ctx.fillRect(x + 6, y + 5, 2, 1);
+  ctx.fillRect(x + 5, y + 6, 2, 2);
+  // Dark facet line (right side)
+  ctx.fillStyle = "#800808";
+  ctx.fillRect(x + 10, y + 7, 1, 2);
+  ctx.fillRect(x + 9, y + 9, 1, 1);
+  // Sparkle
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x + 6, y + 6, 1, 1);
+}
+
+// Pickaxe (tiered): handle + head. Head color varies by tier (iron/diamond).
+function drawPickaxeTiered(ctx: CanvasRenderingContext2D, x: number, y: number, headColor: string, darkColor: string) {
+  // Handle (brown, diagonal from bottom-left to top-right)
+  ctx.fillStyle = "#8b5a2b";
+  for (let i = 0; i < 10; i++) {
+    ctx.fillRect(x + 3 + i, y + 12 - i, 2, 1);
+  }
+  ctx.fillStyle = "#6b4421";
+  for (let i = 0; i < 10; i++) {
+    ctx.fillRect(x + 3 + i, y + 12 - i, 1, 1);
+  }
+  // Head (curved bar across the top)
+  ctx.fillStyle = headColor;
+  // Horizontal bar
+  ctx.fillRect(x + 4, y + 3, 8, 2);
+  // Left pick
+  ctx.fillRect(x + 3, y + 4, 1, 2);
+  ctx.fillRect(x + 2, y + 5, 1, 1);
+  // Right pick
+  ctx.fillRect(x + 12, y + 4, 1, 2);
+  ctx.fillRect(x + 13, y + 5, 1, 1);
+  // Dark shading on the head
+  ctx.fillStyle = darkColor;
+  ctx.fillRect(x + 4, y + 4, 8, 1);
+  ctx.fillRect(x + 3, y + 5, 1, 1);
+  ctx.fillRect(x + 12, y + 5, 1, 1);
+  // Highlight
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x + 5, y + 3, 1, 1);
+}
+
 // Crafting table top: wooden surface with a 3x3 grid carved into it.
 function drawCraftingTop(ctx: CanvasRenderingContext2D, x: number, y: number) {
   // Border (darker wood)
@@ -683,31 +1088,72 @@ function lighten(hex: string, amount: number): string {
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
 }
 
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0;
-    a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function hashStr(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
 // Convenience: get the U offset (0..1 in atlas X) for a face column.
 // 0 = top, 1 = side, 2 = bottom
 export function faceColumnU(faceKind: "top" | "side" | "bottom"): number {
   if (faceKind === "top") return 0;
   if (faceKind === "side") return 1;
   return 2;
+}
+
+// Door top half: window grid (4 small panes) above a rail.
+function drawDoorTop(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  // Outer frame (dark border)
+  ctx.fillStyle = "#5a3a18";
+  ctx.fillRect(x, y, TILE, 1);
+  ctx.fillRect(x, y + TILE - 1, TILE, 1);
+  ctx.fillRect(x, y, 1, TILE);
+  ctx.fillRect(x + TILE - 1, y, 1, TILE);
+  // 4 window panes (2x2 grid) in the upper portion
+  const paneY = y + 2;
+  const paneH = 6;
+  ctx.fillStyle = "#8a9aac";
+  ctx.fillRect(x + 2, paneY, 5, paneH);
+  ctx.fillRect(x + 9, paneY, 5, paneH);
+  // Pane dividers
+  ctx.fillStyle = "#5a3a18";
+  ctx.fillRect(x + 7, paneY, 2, paneH); // vertical divider
+  ctx.fillRect(x + 2, paneY + 3, 12, 1); // horizontal divider
+  // Lower rail (solid wood) — already base-filled
+}
+
+// Door bottom half: vertical wood panels with a handle.
+function drawDoorSide(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  // Outer frame
+  ctx.fillStyle = "#5a3a18";
+  ctx.fillRect(x, y, TILE, 1);
+  ctx.fillRect(x, y + TILE - 1, TILE, 1);
+  ctx.fillRect(x, y, 1, TILE);
+  ctx.fillRect(x + TILE - 1, y, 1, TILE);
+  // Two recessed vertical panels
+  ctx.fillStyle = "#7a5a28";
+  ctx.fillRect(x + 2, y + 2, 5, 5);
+  ctx.fillRect(x + 9, y + 2, 5, 5);
+  ctx.fillStyle = "#5a3a18";
+  ctx.fillRect(x + 2, y + 8, 5, 5);
+  ctx.fillRect(x + 9, y + 8, 5, 5);
+  // Door handle (small dark dot on the right side)
+  ctx.fillStyle = "#d0c060";
+  ctx.fillRect(x + 12, y + 7, 2, 2);
+}
+
+// Hay bale: horizontal straw strands with golden highlights.
+function drawHay(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  // Horizontal strand bands
+  for (let py = 0; py < TILE; py += 2) {
+    ctx.fillStyle = (py / 2) % 2 === 0 ? "#d8b058" : "#a88838";
+    ctx.fillRect(x, y + py, TILE, 1);
+  }
+  // Random straw flecks
+  for (let i = 0; i < 18; i++) {
+    const px = Math.floor(Math.random() * TILE);
+    const py = Math.floor(Math.random() * TILE);
+    ctx.fillStyle = Math.random() < 0.5 ? "#e8c878" : "#7a5818";
+    ctx.fillRect(x + px, y + py, 1, 1);
+  }
+  // Bindings: two vertical straps
+  ctx.fillStyle = "#5a3a18";
+  ctx.fillRect(x + 4, y, 1, TILE);
+  ctx.fillRect(x + TILE - 5, y, 1, TILE);
 }
 

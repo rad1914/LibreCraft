@@ -20,6 +20,7 @@ import {
   TILES_PER_ROW,
   TILE,
 } from "./textures";
+import type { Dimension } from "./world";
 
 export interface ChunkNeighborGetter {
   (worldX: number, worldY: number, worldZ: number): number;
@@ -63,9 +64,120 @@ export class Chunk {
   }
 
   // Procedurally generate this chunk's terrain from a seed.
-  generate(seed: number, heightNoise: Noise, biomeNoise: Noise, tempNoise: Noise) {
+  // `placeExtra` is a callback the generator uses to write blocks that
+  // fall outside this chunk's bounds (e.g. tree leaves spanning a
+  // border) — the World stores them and applies them when the neighbor
+  // chunk is generated. This fixes the "half-cut trees" bug.
+  // `dimension` switches between overworld (normal terrain) and sky
+  // (floating islands at high altitude).
+  generate(
+    seed: number,
+    heightNoise: Noise,
+    biomeNoise: Noise,
+    tempNoise: Noise,
+    dimension: Dimension,
+    placeExtra: (wx: number, wy: number, wz: number, id: number) => void,
+  ) {
+    if (dimension === "sky") {
+      this.generateSky(seed, heightNoise, biomeNoise, placeExtra);
+      return;
+    }
+    this.generateOverworld(seed, heightNoise, biomeNoise, tempNoise, placeExtra);
+  }
+
+  // Sky dimension generation: large floating islands at high altitude.
+  // Inherits overworld terrain features (ores, caves, trees, flowers, tall
+  // grass) but applies them to the floating island terrain instead of a
+  // solid world. Islands are bigger and thicker than before.
+  private generateSky(
+    seed: number,
+    heightNoise: Noise,
+    biomeNoise: Noise,
+    placeExtra: (wx: number, wy: number, wz: number, id: number) => void,
+  ) {
     const baseX = this.cx * CHUNK_SIZE;
     const baseZ = this.cz * CHUNK_SIZE;
+    const ISLAND_BASE_Y = 40; // surface altitude
+    const ISLAND_THICKNESS = 16; // much thicker islands (was 6)
+
+    // Cave noise (same as overworld — reuse for island interiors).
+    const caveNoise1 = heightNoise;
+    const caveNoise2 = biomeNoise;
+
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+      for (let z = 0; z < CHUNK_SIZE; z++) {
+        const wx = baseX + x;
+        const wz = baseZ + z;
+        // Island mask: lower-frequency noise for BIGGER islands. Threshold
+        // 0.25 leaves wider gaps between islands while making each one larger.
+        const mask = heightNoise.fbm2D(wx * 0.018, wz * 0.018, 4);
+        if (mask < 0.25) continue; // air — no island here
+
+        // Island thickness varies — much thicker in the center (up to 20+).
+        const thicknessNoise = heightNoise.fbm2D(wx * 0.04 + 500, wz * 0.04 + 500, 3);
+        const thickness = Math.max(4, Math.floor(ISLAND_THICKNESS * (0.5 + thicknessNoise * 0.8)));
+
+        // Surface height variation (±3 blocks for rolling hills on islands)
+        const surfaceVar = Math.floor(biomeNoise.fbm2D(wx * 0.06, wz * 0.06, 3) * 4);
+        const surfaceY = ISLAND_BASE_Y + surfaceVar;
+
+        for (let dy = 0; dy < thickness; dy++) {
+          const y = surfaceY - dy;
+          if (y < 0 || y >= CHUNK_HEIGHT) continue;
+          let block: number;
+          if (dy === 0) {
+            block = BlockType.GRASS; // grass top
+          } else if (dy < 3) {
+            block = BlockType.DIRT; // dirt below surface
+          } else {
+            block = BlockType.STONE; // stone core
+            // Underground ore generation (inherited from overworld).
+            if (y > 2) block = rollOre(wx, y, wz, seed);
+          }
+
+          // Cave carving (inherited from overworld) — only in stone, not
+          // in the surface grass/dirt layer.
+          if (dy >= 3 && y > 2 && block === BlockType.STONE && shouldCarveCave(caveNoise1, caveNoise2, wx, y, wz)) {
+            block = BlockType.AIR;
+          }
+
+          this.blocks[this.idx(x, y, z)] = block;
+        }
+
+        // Surface decorations (inherited from overworld): tall grass + flowers.
+        const decoHash = hash3(wx + 31, wz - 17, seed + 1);
+        if (decoHash < 0.18) {
+          this.blocks[this.idx(x, surfaceY + 1, z)] = BlockType.TALL_GRASS;
+        }
+        if (decoHash > 0.85 && decoHash < 0.92) {
+          this.blocks[this.idx(x, surfaceY + 1, z)] = BlockType.FLOWER;
+        }
+
+        // Trees (inherited from overworld) — higher chance on big islands.
+        const treeHash = hash3(wx, wz, seed + 7777);
+        if (treeHash < 0.05 && surfaceY + 1 < CHUNK_HEIGHT) {
+          this.placeTree(x, surfaceY + 1, z, Biome.FOREST, baseX, baseZ, placeExtra);
+        }
+      }
+    }
+    this.generated = true;
+    this.dirty = true;
+  }
+
+  private generateOverworld(
+    seed: number,
+    heightNoise: Noise,
+    biomeNoise: Noise,
+    tempNoise: Noise,
+    placeExtra: (wx: number, wy: number, wz: number, id: number) => void,
+  ) {
+    const baseX = this.cx * CHUNK_SIZE;
+    const baseZ = this.cz * CHUNK_SIZE;
+
+    // Cave noise: reuse heightNoise with a different frequency for 3D
+    // cave carving. Two overlapping noise fields create twisting tunnels.
+    const caveNoise1 = heightNoise;
+    const caveNoise2 = biomeNoise;
 
     for (let x = 0; x < CHUNK_SIZE; x++) {
       for (let z = 0; z < CHUNK_SIZE; z++) {
@@ -77,7 +189,14 @@ export class Chunk {
         const def = BIOMES[biome];
         const n = heightNoise.fbm2D(wx * 0.013, wz * 0.013, 5, 2, 0.5);
         const ridge = Math.pow(Math.abs(heightNoise.fbm2D(wx * 0.022 + 333, wz * 0.022 - 333, 4)), 1.4);
-        const height = Math.floor(def.baseHeight + n * def.amplitude + (biome === Biome.MOUNTAINS ? ridge * def.amplitude : 0));
+        // Mountains: taller peaks with amplified ridge noise. The base
+        // amplitude is doubled for mountains, and the ridge contribution
+        // is squared for sharper, more dramatic summits.
+        let mountainBoost = 0;
+        if (biome === Biome.MOUNTAINS) {
+          mountainBoost = ridge * ridge * def.amplitude * 1.8 + ridge * def.amplitude * 0.5;
+        }
+        const height = Math.floor(def.baseHeight + n * def.amplitude + mountainBoost);
         const clamped = Math.max(1, Math.min(CHUNK_HEIGHT - 2, height));
 
         for (let y = 0; y <= clamped; y++) {
@@ -100,34 +219,72 @@ export class Chunk {
             }
           } else if (y >= clamped - 3) {
             block = def.filler;
+          } else {
+            // Underground ore generation — depth-tiered.
+            if (y < clamped - 4 && y > 2) block = rollOre(wx, y, wz, seed);
           }
+
+          // Cave carving: only below the surface (y < clamped - 4) and above
+          // bedrock (y > 2) so we don't break floors or surface features.
+          if (y < clamped - 4 && y > 2 && block === BlockType.STONE && shouldCarveCave(caveNoise1, caveNoise2, wx, y, wz)) {
+            block = BlockType.AIR;
+          }
+
           this.blocks[this.idx(x, y, z)] = block;
         }
 
-        // Fill water up to sea level
+        // Fill water up to sea level (but not in carved caves)
         for (let y = clamped + 1; y <= SEA_LEVEL_ADJ; y++) {
-          this.blocks[this.idx(x, y, z)] = BlockType.WATER;
+          if (this.blocks[this.idx(x, y, z)] === BlockType.AIR) {
+            this.blocks[this.idx(x, y, z)] = BlockType.WATER;
+          }
+        }
+
+        // Surface decorations (only on land above sea level).
+        const isLand = clamped >= SEA_LEVEL_ADJ && biome !== Biome.OCEAN;
+        if (isLand) {
+          const decoHash = hash3(wx + 31, wz - 17, seed + 1);
+          // Grass tufts in plains/forest/snowy biomes
+          if (
+            (biome === Biome.PLAINS || biome === Biome.FOREST || biome === Biome.SNOWY) &&
+            decoHash < 0.18
+          ) {
+            this.blocks[this.idx(x, clamped + 1, z)] = BlockType.TALL_GRASS;
+          }
+          // Flowers — only in plains
+          if (biome === Biome.PLAINS && decoHash > 0.85 && decoHash < 0.92) {
+            this.blocks[this.idx(x, clamped + 1, z)] = BlockType.FLOWER;
+          }
         }
 
         // Trees: deterministic per-column hash so world is reproducible
-        if (def.treeChance > 0 && clamped >= SEA_LEVEL_ADJ && biome !== Biome.OCEAN) {
+        if (def.treeChance > 0 && isLand) {
           const hash = hash3(wx, wz, seed);
           if (hash < def.treeChance && biome !== Biome.DESERT) {
-            this.placeTree(x, clamped + 1, z, biome);
+            this.placeTree(x, clamped + 1, z, biome, baseX, baseZ, placeExtra);
           }
         }
 
         // Mountains: occasional stone outcrops above the snow line for
-        // a more rugged, rocky feel on the peaks. Already snow-capped
-        // above y=44 via the surface block; here we add a few floating
-        // stone nubs on top of the snow to break up the flat white.
+        // a more rugged, rocky feel on the peaks.
         if (biome === Biome.MOUNTAINS && clamped > 44 && clamped < CHUNK_HEIGHT - 2) {
           const outcropHash = hash3(wx + 9999, wz - 9999, seed + 7);
           if (outcropHash < 0.08) {
-            // Small 1-2 block stone nub on top of the snow.
             this.blocks[this.idx(x, clamped + 1, z)] = BlockType.STONE;
             if (outcropHash < 0.03 && clamped + 2 < CHUNK_HEIGHT) {
               this.blocks[this.idx(x, clamped + 2, z)] = BlockType.STONE;
+            }
+          }
+        }
+
+        // Occasional mossy-cobble boulders in forests and mountains.
+        if (isLand && (biome === Biome.FOREST || biome === Biome.MOUNTAINS)) {
+          const boulderHash = hash3(wx + 555, wz - 555, seed + 11);
+          if (boulderHash < 0.012 && clamped + 1 < CHUNK_HEIGHT) {
+            this.blocks[this.idx(x, clamped + 1, z)] = BlockType.MOSSY_COBBLE;
+            // 50% chance of a 2-block boulder
+            if (boulderHash < 0.006 && clamped + 2 < CHUNK_HEIGHT) {
+              this.blocks[this.idx(x, clamped + 2, z)] = BlockType.MOSSY_COBBLE;
             }
           }
         }
@@ -137,7 +294,11 @@ export class Chunk {
     this.dirty = true;
   }
 
-  private placeTree(x: number, y: number, z: number, biome: Biome) {
+  private placeTree(
+    x: number, y: number, z: number, biome: Biome,
+    baseX: number, baseZ: number,
+    placeExtra: (wx: number, wy: number, wz: number, id: number) => void,
+  ) {
     // Trunk height varies by biome and a per-tree hash. Forests get
     // taller trees (5..7) with occasional 2-block-taller giants; plains
     // get small trees (4..5); mountains get stunted trees (5).
@@ -145,13 +306,28 @@ export class Chunk {
     let trunkHeight: number;
     if (biome === Biome.FOREST) {
       trunkHeight = 5 + Math.floor(h * 3);
-      // 25% chance of a "big" forest tree — 2 blocks taller than normal.
       if (h > 0.75) trunkHeight += 2;
     } else if (biome === Biome.MOUNTAINS) {
       trunkHeight = 5;
     } else {
       trunkHeight = 4 + Math.floor(h * 2);
     }
+    // Helper to write a block at local (lx,ly,lz) — if it falls outside
+    // this chunk, route it through `placeExtra` so the neighbor chunk
+    // picks it up when it's generated. This is the fix for half-cut
+    // trees at chunk borders.
+    const setSafe = (lx: number, ly: number, lz: number, id: number) => {
+      if (ly < 0 || ly >= CHUNK_HEIGHT) return;
+      if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE) {
+        // Cross-chunk — defer via the World callback.
+        placeExtra(baseX + lx, ly, baseZ + lz, id);
+        return;
+      }
+      if (this.blocks[this.idx(lx, ly, lz)] === BlockType.AIR) {
+        this.blocks[this.idx(lx, ly, lz)] = id;
+      }
+    };
+
     // Trunk
     for (let i = 0; i < trunkHeight; i++) {
       if (y + i < CHUNK_HEIGHT) this.setLocal(x, y + i, z, BlockType.WOOD);
@@ -161,15 +337,8 @@ export class Chunk {
     for (let dx = -2; dx <= 2; dx++) {
       for (let dz = -2; dz <= 2; dz++) {
         for (let dy = -1; dy <= 0; dy++) {
-          const lx = x + dx;
-          const ly = topY + dy;
-          const lz = z + dz;
-          if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE) continue;
-          if (ly < 0 || ly >= CHUNK_HEIGHT) continue;
           if (Math.abs(dx) + Math.abs(dz) === 4) continue;
-          if (this.blocks[this.idx(lx, ly, lz)] === BlockType.AIR) {
-            this.blocks[this.idx(lx, ly, lz)] = BlockType.LEAVES;
-          }
+          setSafe(x + dx, topY + dy, z + dz, BlockType.LEAVES);
         }
       }
     }
@@ -177,87 +346,106 @@ export class Chunk {
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
         if (Math.abs(dx) + Math.abs(dz) === 2) continue;
-        const lx = x + dx;
-        const lz = z + dz;
-        if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE) continue;
-        if (topY + 1 < CHUNK_HEIGHT && this.blocks[this.idx(lx, topY + 1, lz)] === BlockType.AIR) {
-          this.blocks[this.idx(lx, topY + 1, lz)] = BlockType.LEAVES;
-        }
+        setSafe(x + dx, topY + 1, z + dz, BlockType.LEAVES);
       }
     }
-    if (topY + 2 < CHUNK_HEIGHT && this.blocks[this.idx(x, topY + 2, z)] === BlockType.AIR) {
-      this.blocks[this.idx(x, topY + 2, z)] = BlockType.LEAVES;
-    }
+    setSafe(x, topY + 2, z, BlockType.LEAVES);
   }
 
   // Build (or rebuild) the chunk's meshes from its current block data.
+  //
+  // Performance: uses a small dynamically-growable typed-array buffer
+  // instead of plain number[] arrays. The buffer starts at a modest
+  // 8K-vertex capacity (enough for typical chunks) and doubles when
+  // full — far cheaper than the GC churn of `array.push(x,y,z)` on
+  // hot paths. Local in-chunk neighbor reads avoid the World.getMap/
+  // string-key path for the 6 neighbor lookups each block does.
   buildMeshes(material: THREE.Material, transparentMaterial: THREE.Material, neighborGetter: ChunkNeighborGetter) {
     const atlas = getTextureAtlas();
     const texture = atlas.texture;
     const rows = atlas.rows;
-    // Inset UVs to avoid bleeding at tile borders
     const insetU = 0.5 / (TILES_PER_ROW * TILE);
     const insetV = 0.5 / (rows * TILE);
 
-    const opaquePositions: number[] = [];
-    const opaqueUvs: number[] = [];
-    const opaqueNormals: number[] = [];
-    const opaqueIndices: number[] = [];
-
-    const transPositions: number[] = [];
-    const transUvs: number[] = [];
-    const transNormals: number[] = [];
-    const transIndices: number[] = [];
+    const opaque = new MeshBuf();
+    const trans = new MeshBuf();
 
     const baseX = this.cx * CHUNK_SIZE;
     const baseZ = this.cz * CHUNK_SIZE;
+    const blocks = this.blocks;
 
     for (let y = 0; y < CHUNK_HEIGHT; y++) {
       for (let z = 0; z < CHUNK_SIZE; z++) {
         for (let x = 0; x < CHUNK_SIZE; x++) {
-          const id = this.blocks[this.idx(x, y, z)];
-          if (isAir(id)) continue;
+          const i = (y * CHUNK_SIZE + z) * CHUNK_SIZE + x;
+          const id = blocks[i];
+          if (id === 0) continue; // AIR
           const def = BLOCKS[id];
           const wx = baseX + x;
           const wy = y;
           const wz = baseZ + z;
 
-          const target = def.transparent
-            ? { pos: transPositions, uv: transUvs, nor: transNormals, idx: transIndices }
-            : { pos: opaquePositions, uv: opaqueUvs, nor: opaqueNormals, idx: opaqueIndices };
+          // Inline neighbor lookup: prefer local reads (same chunk).
+          const getNeighbor = (dx: number, dy: number, dz: number): number => {
+            const nx = x + dx, ny = y + dy, nz = z + dz;
+            if (nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE && ny >= 0 && ny < CHUNK_HEIGHT) {
+              return blocks[(ny * CHUNK_SIZE + nz) * CHUNK_SIZE + nx];
+            }
+            return neighborGetter(wx + dx, wy + dy, wz + dz);
+          };
 
+          // Sprite blocks (flowers, tall grass) render as two crossed quads.
+          if (def.sprite) {
+            const row = getTileRow(texture, id);
+            const colU = faceColumnU("side");
+            const u0 = (colU / TILES_PER_ROW) + insetU;
+            const u1 = ((colU + 1) / TILES_PER_ROW) - insetU;
+            const v1 = 1 - (row / rows) - insetV;
+            const v0 = 1 - ((row + 1) / rows) + insetV;
+            const quads = [
+              [[0,0,0],[1,0,1],[1,1,1],[0,1,0]],
+              [[1,0,0],[0,0,1],[0,1,1],[1,1,0]],
+            ] as const;
+            for (const corners of quads) {
+              // Front
+              let sv = trans.vertCount;
+              for (let k = 0; k < 4; k++) {
+                trans.pushVert(wx + corners[k][0], wy + corners[k][1], wz + corners[k][2], 0, 1, 0,
+                  (k === 0 || k === 3) ? u0 : u1, (k === 0 || k === 1) ? v0 : v1);
+              }
+              trans.pushQuadIdx(sv);
+              // Back (reverse winding)
+              sv = trans.vertCount;
+              for (let k = 0; k < 4; k++) {
+                trans.pushVert(wx + corners[k][0], wy + corners[k][1], wz + corners[k][2], 0, 1, 0,
+                  (k === 0 || k === 3) ? u0 : u1, (k === 0 || k === 1) ? v0 : v1);
+              }
+              trans.pushQuadIdxReversed(sv);
+            }
+            continue;
+          }
+
+          const target = def.transparent ? trans : opaque;
           const row = getTileRow(texture, id);
 
           for (const face of FACES) {
-            const nx = wx + face.dir[0];
-            const ny = wy + face.dir[1];
-            const nz = wz + face.dir[2];
-            const neighbor = neighborGetter(nx, ny, nz);
-
-            // Cull rules:
-            //  - face is hidden if neighbor is solid opaque
-            //  - water faces against water are hidden
-            //  - leaves/glass faces against same type are hidden
+            const neighbor = getNeighbor(face.dir[0], face.dir[1], face.dir[2]);
             if (!shouldRenderFace(id, neighbor)) continue;
 
-            // UV rect for this face's tile
-            const colU = faceColumnU(face.kind); // 0,1,2
+            const colU = faceColumnU(face.kind);
             const u0 = (colU / TILES_PER_ROW) + insetU;
             const u1 = ((colU + 1) / TILES_PER_ROW) - insetU;
-            // Row 0 is at the TOP of the atlas texture (v=1); row `rows-1`
-            // is at the bottom (v=0). Each tile spans 1/rows vertically.
-            const v1 = 1 - (row / rows) - insetV; // top edge
-            const v0 = 1 - ((row + 1) / rows) + insetV; // bottom edge
+            const v1 = 1 - (row / rows) - insetV;
+            const v0 = 1 - ((row + 1) / rows) + insetV;
 
-            const startVertex = target.pos.length / 3;
-            for (let i = 0; i < 4; i++) {
-              const corner = face.corners[i];
-              target.pos.push(wx + corner[0], wy + corner[1], wz + corner[2]);
-              target.nor.push(face.dir[0], face.dir[1], face.dir[2]);
-              const [uu, vv] = uvCorner(face.uvCorners[i], u0, u1, v0, v1);
-              target.uv.push(uu, vv);
+            const sv = target.vertCount;
+            for (let k = 0; k < 4; k++) {
+              const corner = face.corners[k];
+              const [uu, vv] = uvCorner(face.uvCorners[k], u0, u1, v0, v1);
+              target.pushVert(wx + corner[0], wy + corner[1], wz + corner[2],
+                face.dir[0], face.dir[1], face.dir[2], uu, vv);
             }
-            target.idx.push(startVertex, startVertex + 1, startVertex + 2, startVertex + 2, startVertex + 3, startVertex);
+            target.pushQuadIdx(sv);
           }
         }
       }
@@ -273,21 +461,21 @@ export class Chunk {
       this.transparentMesh = null;
     }
 
-    if (opaquePositions.length > 0) {
+    if (opaque.vertCount > 0) {
       const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.Float32BufferAttribute(opaquePositions, 3));
-      geo.setAttribute("uv", new THREE.Float32BufferAttribute(opaqueUvs, 2));
-      geo.setAttribute("normal", new THREE.Float32BufferAttribute(opaqueNormals, 3));
-      geo.setIndex(opaqueIndices);
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(opaque.pos.subarray(0, opaque.vertCount * 3), 3));
+      geo.setAttribute("uv", new THREE.Float32BufferAttribute(opaque.uv.subarray(0, opaque.vertCount * 2), 2));
+      geo.setAttribute("normal", new THREE.Float32BufferAttribute(opaque.nor.subarray(0, opaque.vertCount * 3), 3));
+      geo.setIndex(new THREE.Uint32BufferAttribute(opaque.idx.subarray(0, opaque.idxCount), 1));
       this.opaqueMesh = new THREE.Mesh(geo, material);
       this.opaqueMesh.frustumCulled = true;
     }
-    if (transPositions.length > 0) {
+    if (trans.vertCount > 0) {
       const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.Float32BufferAttribute(transPositions, 3));
-      geo.setAttribute("uv", new THREE.Float32BufferAttribute(transUvs, 2));
-      geo.setAttribute("normal", new THREE.Float32BufferAttribute(transNormals, 3));
-      geo.setIndex(transIndices);
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(trans.pos.subarray(0, trans.vertCount * 3), 3));
+      geo.setAttribute("uv", new THREE.Float32BufferAttribute(trans.uv.subarray(0, trans.vertCount * 2), 2));
+      geo.setAttribute("normal", new THREE.Float32BufferAttribute(trans.nor.subarray(0, trans.vertCount * 3), 3));
+      geo.setIndex(new THREE.Uint32BufferAttribute(trans.idx.subarray(0, trans.idxCount), 1));
       this.transparentMesh = new THREE.Mesh(geo, transparentMaterial);
       this.transparentMesh.frustumCulled = true;
     }
@@ -303,6 +491,72 @@ export class Chunk {
       this.transparentMesh.geometry.dispose();
       this.transparentMesh = null;
     }
+  }
+}
+
+// Growable typed-array buffer for chunk meshing. Starts small (4K verts)
+// and doubles capacity when full — far cheaper than `number[].push()` on
+// the hot meshing path, and avoids the memory blowup of pre-allocating
+// the full theoretical max (which would be ~400K verts per chunk).
+class MeshBuf {
+  pos: Float32Array;
+  uv: Float32Array;
+  nor: Float32Array;
+  idx: Uint32Array;
+  vertCount = 0;
+  idxCount = 0;
+
+  constructor() {
+    const cap = 4096; // initial vertex capacity
+    this.pos = new Float32Array(cap * 3);
+    this.uv = new Float32Array(cap * 2);
+    this.nor = new Float32Array(cap * 3);
+    this.idx = new Uint32Array(cap * 6 / 4);
+  }
+
+  private grow() {
+    const newCap = this.pos.length / 3 * 2;
+    const np = new Float32Array(newCap * 3);
+    np.set(this.pos);
+    this.pos = np;
+    const nu = new Float32Array(newCap * 2);
+    nu.set(this.uv);
+    this.uv = nu;
+    const nn = new Float32Array(newCap * 3);
+    nn.set(this.nor);
+    this.nor = nn;
+    const ni = new Uint32Array(newCap * 6 / 4);
+    ni.set(this.idx);
+    this.idx = ni;
+  }
+
+  pushVert(px: number, py: number, pz: number, nx: number, ny: number, nz: number, u: number, v: number) {
+    if (this.vertCount >= this.pos.length / 3) this.grow();
+    const i = this.vertCount;
+    this.pos[i * 3] = px; this.pos[i * 3 + 1] = py; this.pos[i * 3 + 2] = pz;
+    this.nor[i * 3] = nx; this.nor[i * 3 + 1] = ny; this.nor[i * 3 + 2] = nz;
+    this.uv[i * 2] = u; this.uv[i * 2 + 1] = v;
+    this.vertCount++;
+  }
+
+  pushQuadIdx(sv: number) {
+    if (this.idxCount + 6 > this.idx.length) this.grow();
+    this.idx[this.idxCount++] = sv;
+    this.idx[this.idxCount++] = sv + 1;
+    this.idx[this.idxCount++] = sv + 2;
+    this.idx[this.idxCount++] = sv + 2;
+    this.idx[this.idxCount++] = sv + 3;
+    this.idx[this.idxCount++] = sv;
+  }
+
+  pushQuadIdxReversed(sv: number) {
+    if (this.idxCount + 6 > this.idx.length) this.grow();
+    this.idx[this.idxCount++] = sv;
+    this.idx[this.idxCount++] = sv + 3;
+    this.idx[this.idxCount++] = sv + 2;
+    this.idx[this.idxCount++] = sv + 2;
+    this.idx[this.idxCount++] = sv + 1;
+    this.idx[this.idxCount++] = sv;
   }
 }
 
@@ -396,4 +650,27 @@ function hash3(x: number, y: number, z: number): number {
   h = (h ^ (h >>> 13)) * 1274126177;
   h = h ^ (h >>> 16);
   return ((h >>> 0) / 0xFFFFFFFF);
+}
+
+// Depth-tiered underground ore generation. Returns the ore block id for the
+// given (wx, y, wz, seed) coordinate, or BlockType.STONE if no ore should
+// spawn there. Coal is most common (any depth), iron below y=32, diamond
+// below y=16, ruby below y=10 (very rare).
+function rollOre(wx: number, y: number, wz: number, seed: number): number {
+  const h = hash3(wx * 7, y * 13, wz * 11 + seed);
+  if (h < 0.012) return BlockType.COAL_ORE;
+  if (h < 0.018 && y < 32) return BlockType.IRON_ORE;
+  if (h < 0.004 && y < 16) return BlockType.DIAMOND_ORE;
+  if (h < 0.0015 && y < 10) return BlockType.RUBY_ORE;
+  return BlockType.STONE;
+}
+
+// Cave-carving check: returns true if the block at (wx, y, wz) should be
+// carved to AIR by overlapping 3D noise fields. Both noise values must be
+// high (> 0.55) for a block to be carved, producing sparse tunnels rather
+// than swiss cheese.
+function shouldCarveCave(caveNoise1: Noise, caveNoise2: Noise, wx: number, y: number, wz: number): boolean {
+  const c1 = caveNoise1.noise3D(wx * 0.05, y * 0.08, wz * 0.05);
+  const c2 = caveNoise2.noise3D(wx * 0.05 + 100, y * 0.08 + 100, wz * 0.05 + 100);
+  return c1 > 0.55 && c2 > 0.55;
 }

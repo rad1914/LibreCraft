@@ -4,7 +4,7 @@
 //
 // Messages:
 //   client → server: "join" { name }, "move" { x,y,z,yaw,pitch }, "block" { x,y,z,id },
-//                    "chat" { message }, "damage" { target, amount }, "health" { health }
+//                    "chat" { message }, "damage" { target, amount }
 //   server → client: "players" [...], "player-joined" {...}, "player-moved" {...},
 //                    "player-left" { id }, "block" {...}, "chat" { id, name, message },
 //                    "damage" { from, fromName, amount }
@@ -68,14 +68,6 @@ io.on("connection", (socket) => {
     socket.broadcast.emit("player-moved", p);
   });
 
-  socket.on("health", (data: { health: number }) => {
-    const p = players.get(socket.id);
-    if (!p) return;
-    p.health = data.health;
-    // Don't need to broadcast every health tick; the move handler
-    // already includes the latest health in player-moved payloads.
-  });
-
   socket.on("block", (data: { x: number; y: number; z: number; id: number }) => {
     // Broadcast block edits to everyone else
     socket.broadcast.emit("block", data);
@@ -127,9 +119,6 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`MCJS LAN server running on port ${PORT}`);
 });
 
-process.on("SIGTERM", () => {
-  httpServer.close(() => process.exit(0));
-});
-process.on("SIGINT", () => {
-  httpServer.close(() => process.exit(0));
-});
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => httpServer.close(() => process.exit(0)));
+}

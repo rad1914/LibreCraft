@@ -2,6 +2,8 @@
 // Implements a permutation-table based 2D/3D value-gradient noise
 // (Perlin-style) and a small fractal helper (FBM).
 
+import { mulberry32 } from "./rng";
+
 export class Noise {
   private perm: Uint8Array;
 
@@ -73,10 +75,7 @@ export class Noise {
 
   // Fractal Brownian Motion (sum of octaves)
   fbm2D(x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5): number {
-    let sum = 0;
-    let amp = 1;
-    let freq = 1;
-    let maxAmp = 0;
+    let sum = 0, amp = 1, freq = 1, maxAmp = 0;
     for (let i = 0; i < octaves; i++) {
       sum += this.noise2D(x * freq, y * freq) * amp;
       maxAmp += amp;
@@ -85,31 +84,6 @@ export class Noise {
     }
     return sum / maxAmp;
   }
-
-  fbm3D(x: number, y: number, z: number, octaves = 4, lacunarity = 2, gain = 0.5): number {
-    let sum = 0;
-    let amp = 1;
-    let freq = 1;
-    let maxAmp = 0;
-    for (let i = 0; i < octaves; i++) {
-      sum += this.noise3D(x * freq, y * freq, z * freq) * amp;
-      maxAmp += amp;
-      amp *= gain;
-      freq *= lacunarity;
-    }
-    return sum / maxAmp;
-  }
-}
-
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0;
-    a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 function fade(t: number): number {

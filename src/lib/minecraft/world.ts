@@ -9,23 +9,38 @@ import { BlockType, isSolid } from "./blocks";
 import { Noise } from "./noise";
 import { getTextureAtlas } from "./textures";
 
+export type Dimension = "overworld" | "sky";
+
 export class World {
   chunks = new Map<string, Chunk>();
   scene: THREE.Scene;
   seed: number;
+  dimension: Dimension;
 
   material: THREE.Material;
   transparentMaterial: THREE.Material;
 
   edits = new Map<string, number>();
 
+  // Open doors — tracks which DOOR blocks are currently "open" (pass-through).
+  // Keyed by "x,y,z" of the door's BASE block (the bottom half of the 2-tall door).
+  // The block id stays DOOR whether open or closed; this Set records the
+  // open state so isSolidAt can return false for open doors.
+  openDoors = new Set<string>();
+
+  // Blocks queued by terrain generation that fell outside their origin
+  // chunk (e.g. tree leaves spanning a chunk border). Drained into a
+  // chunk the moment that chunk is generated. Keyed by `${wx},${wy},${wz}`.
+  pendingExtraBlocks = new Map<string, number>();
+
   private heightNoise: Noise;
   private biomeNoise: Noise;
   private tempNoise: Noise;
 
-  constructor(scene: THREE.Scene, seed: number = 1337) {
+  constructor(scene: THREE.Scene, seed: number = 1337, dimension: Dimension = "overworld") {
     this.scene = scene;
     this.seed = seed;
+    this.dimension = dimension;
     this.heightNoise = new Noise(seed);
     this.biomeNoise = new Noise(seed + 1);
     this.tempNoise = new Noise(seed + 2);
@@ -59,8 +74,26 @@ export class World {
     let c = this.chunks.get(k);
     if (!c) {
       c = new Chunk(cx, cz);
-      c.generate(this.seed, this.heightNoise, this.biomeNoise, this.tempNoise);
+      // Pass a callback so tree leaves that span a chunk border are
+      // stored safely on this World and applied when their target chunk
+      // is generated (instead of being silently dropped at the edge).
+      c.generate(this.seed, this.heightNoise, this.biomeNoise, this.tempNoise, this.dimension, (wx, wy, wz, id) => {
+        const tcx = Math.floor(wx / CHUNK_SIZE);
+        const tcz = Math.floor(wz / CHUNK_SIZE);
+        if (tcx === cx && tcz === cz) {
+          // Same chunk — write directly through setLocal.
+          const lx = wx - tcx * CHUNK_SIZE;
+          const lz = wz - tcz * CHUNK_SIZE;
+          c.setLocal(lx, wy, lz, id);
+        } else {
+          // Different chunk — queue it for the neighbor.
+          this.pendingExtraBlocks.set(`${wx},${wy},${wz}`, id);
+        }
+      });
       this.chunks.set(k, c);
+      // Drain any pending extra-blocks for THIS chunk that were queued
+      // by a neighbor's earlier tree placement.
+      this.drainPendingForChunk(c, cx, cz);
       // Mark any already-existing neighbors dirty so their border faces
       // re-cull against the newly generated chunk's blocks.
       this.markDirty(cx - 1, cz);
@@ -69,6 +102,32 @@ export class World {
       this.markDirty(cx, cz + 1);
     }
     return c;
+  }
+
+  // Apply any deferred cross-chunk blocks that targeted (cx, cz).
+  private drainPendingForChunk(c: Chunk, cx: number, cz: number) {
+    if (this.pendingExtraBlocks.size === 0) return;
+    const baseX = cx * CHUNK_SIZE;
+    const baseZ = cz * CHUNK_SIZE;
+    // Iterate keys; we can't avoid a scan because the map is keyed by
+    // world coordinates, not by chunk. This is bounded by total pending
+    // size (a few hundred at most during normal play).
+    const toDelete: string[] = [];
+    for (const [key, id] of this.pendingExtraBlocks) {
+      const [sx, sy, sz] = key.split(",");
+      const wx = +sx, wy = +sy, wz = +sz;
+      const tcx = Math.floor(wx / CHUNK_SIZE);
+      const tcz = Math.floor(wz / CHUNK_SIZE);
+      if (tcx === cx && tcz === cz) {
+        const lx = wx - baseX;
+        const lz = wz - baseZ;
+        if (wy >= 0 && wy < CHUNK_HEIGHT) {
+          c.setLocal(lx, wy, lz, id);
+        }
+        toDelete.push(key);
+      }
+    }
+    for (const k of toDelete) this.pendingExtraBlocks.delete(k);
   }
 
   // Stream chunks within `radius` of (playerX, playerZ); unload chunks
@@ -164,32 +223,13 @@ export class World {
 
     // Mark this chunk + any neighbor chunk that touches the edited
     // column so border faces re-cull correctly.
-    chunk.dirty = true;
-    if (lx === 0) this.markDirty(cx - 1, cz);
-    if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cz);
-    if (lz === 0) this.markDirty(cx, cz - 1);
-    if (lz === CHUNK_SIZE - 1) this.markDirty(cx, cz + 1);
+    this.markDirtyAndNeighbors(chunk, cx, cz, lx, lz);
   }
 
   // Replay saved block edits (called on load). Each edit is applied
   // via setBlock so chunk meshes rebuild correctly.
   applyEdits(edits: Array<{ x: number; y: number; z: number; id: number }>) {
-    for (const e of edits) {
-      // Use a direct path that doesn't re-record the edit (to avoid
-      // redundant work — the edits map is already populated below).
-      const cx = Math.floor(e.x / CHUNK_SIZE);
-      const cz = Math.floor(e.z / CHUNK_SIZE);
-      const chunk = this.ensureChunk(cx, cz);
-      const lx = e.x - cx * CHUNK_SIZE;
-      const lz = e.z - cz * CHUNK_SIZE;
-      chunk.setLocal(lx, e.y, lz, e.id);
-      chunk.dirty = true;
-      if (lx === 0) this.markDirty(cx - 1, cz);
-      if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cz);
-      if (lz === 0) this.markDirty(cx, cz - 1);
-      if (lz === CHUNK_SIZE - 1) this.markDirty(cx, cz + 1);
-      this.edits.set(`${e.x},${e.y},${e.z}`, e.id);
-    }
+    for (const e of edits) this.setBlock(e.x, e.y, e.z, e.id);
   }
 
   // Serialize edits for save.
@@ -207,7 +247,58 @@ export class World {
     if (c) c.dirty = true;
   }
 
+  // Public helper: mark the chunk containing (wx, wy, wz) as dirty so it
+  // re-meshes on the next processDirtyBudget tick. Used by the engine
+  // when door open/close state changes (no block id change, just visual).
+  markDirtyAt(wx: number, wy: number, wz: number) {
+    const cx = Math.floor(wx / CHUNK_SIZE);
+    const cz = Math.floor(wz / CHUNK_SIZE);
+    this.markDirty(cx, cz);
+  }
+
+  // Mark the edited chunk dirty, plus any neighbor chunk whose border
+  // touches the edited column.
+  private markDirtyAndNeighbors(chunk: Chunk, cx: number, cz: number, lx: number, lz: number) {
+    chunk.dirty = true;
+    if (lx === 0) this.markDirty(cx - 1, cz);
+    if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cz);
+    if (lz === 0) this.markDirty(cx, cz - 1);
+    if (lz === CHUNK_SIZE - 1) this.markDirty(cx, cz + 1);
+  }
+
   isSolidAt(wx: number, wy: number, wz: number): boolean {
-    return isSolid(this.getBlock(Math.floor(wx), Math.floor(wy), Math.floor(wz)));
+    const x = Math.floor(wx), y = Math.floor(wy), z = Math.floor(wz);
+    const id = this.getBlock(x, y, z);
+    // Open doors are pass-through — check if this block (or the block
+    // below it, if this is the top half of a door) is an open door.
+    if (id === BlockType.DOOR) {
+      // Normalize to the base block (doors are 2 tall).
+      const baseY = this.getBlock(x, y - 1, z) === BlockType.DOOR ? y - 1 : y;
+      if (this.openDoors.has(`${x},${baseY},${z}`)) return false;
+    }
+    return isSolid(id);
+  }
+
+  // Toggle a door's open/closed state. Returns true if the door is now
+  // open, false if now closed.
+  toggleDoor(wx: number, wy: number, wz: number): boolean {
+    // Normalize to the base block.
+    let baseY = wy;
+    if (this.getBlock(wx, wy - 1, wz) === BlockType.DOOR) baseY = wy - 1;
+    const key = `${wx},${baseY},${wz}`;
+    if (this.openDoors.has(key)) {
+      this.openDoors.delete(key);
+      return false;
+    }
+    this.openDoors.add(key);
+    return true;
+  }
+
+  // Check if a door at (wx, wy, wz) is open. Handles both top and bottom
+  // halves of the 2-tall door.
+  isDoorOpen(wx: number, wy: number, wz: number): boolean {
+    let baseY = wy;
+    if (this.getBlock(wx, wy - 1, wz) === BlockType.DOOR) baseY = wy - 1;
+    return this.openDoors.has(`${wx},${baseY},${wz}`);
   }
 }
